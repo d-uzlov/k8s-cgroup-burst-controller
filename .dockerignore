@@ -1,0 +1,9 @@
+
+.gitignore
+.vscode
+
+/LICENSE
+/README.md
+*.patch
+
+Dockerfile
