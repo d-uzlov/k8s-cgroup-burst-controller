@@ -142,7 +142,7 @@ and there are no ways to bypass this, regardless of any kernel parameters.
 ```bash
 
 # local testing
-go build .
+CGO_ENABLED=0 go build .
 ./cgroup-burst
 
 # build image for deployment

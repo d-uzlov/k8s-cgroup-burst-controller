@@ -1,10 +1,12 @@
 {
   "cSpell.words": [
     "apimachinery",
+    "appconfig",
     "bindgen",
     "burstable",
     "clientset",
     "containerd",
+    "containerdhelper",
     "corev1",
     "crictl",
     "devscripts",
@@ -16,6 +18,7 @@
     "errdefs",
     "errors.Wrapf",
     "fakeroot",
+    "k8swatcher",
     "klog",
     "kouhin",
     "kubepods",
