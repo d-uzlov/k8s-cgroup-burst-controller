@@ -36,6 +36,12 @@ kubectl create ns cgroup-burst
 kubectl apply -f https://github.com/d-uzlov/k8s-cgroup-burst-operator/raw/refs/heads/main/deployment/rbac.yaml
 kubectl apply -f https://github.com/d-uzlov/k8s-cgroup-burst-operator/raw/refs/heads/main/deployment/daemonset.yaml
 
+# since realistically you need a custom kernel to benefit from this app
+# the example deployment defines a node selector
+# label all nodes that you want it to be running on
+node=
+kubectl label node $node cgroup.meoe.io/node=enable
+
 # check that everything is working
 kubectl -n cgroup-burst get pod -o wide
 
@@ -205,6 +211,8 @@ Reference for instructions:
 
 Kernel published here is built roughly using instructions from the previous section: [Building kernel](#building-kernel)
 
+TODO: create proper packages with custom kernel
+
 ```bash
 
 mkdir linux-ubuntu-6.8.0-58-cgroup-burst-patch
@@ -212,7 +220,18 @@ cd linux-ubuntu-6.8.0-58-cgroup-burst-patch
 wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-6.8.0-58/linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
 unzip linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
 
-sudo dpkg -i ./*.deb
+sudo dpkg -i linux-bpf-dev_6.8.0-58.60_amd64.deb
+sudo dpkg -i linux-buildinfo-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+# sudo dpkg -i linux-cloud-tools-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+sudo dpkg -i linux-headers-6.8.0-58_6.8.0-58.60_all.deb
+# sudo apt install libc6 libelf1t64 libssl3t64
+# sudo dpkg -i linux-headers-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+sudo dpkg -i linux-lib-rust-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+sudo dpkg -i linux-modules-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+sudo dpkg -i linux-image-unsigned-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+sudo apt install wireless-regdb
+sudo dpkg -i linux-modules-extra-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-ipu6-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-iwlwifi-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-usbio-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+# sudo dpkg -i linux-tools-6.8.0-58-generic_6.8.0-58.60_amd64.deb
 
 rm linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
 
