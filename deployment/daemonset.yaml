@@ -42,6 +42,8 @@ spec:
           value: cgroup.meoe.io/burst=enable
         - name: BURST_ANNOTATION
           value: cgroup.meoe.io/burst
+        - name: WATCH_CONTAINER_EVENTS
+          value: 'true'
         resources:
           requests:
             cpu: 1m

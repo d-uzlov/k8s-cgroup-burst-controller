@@ -3,6 +3,9 @@ module meoe.io/cgroup-burst
 go 1.24
 
 require (
+	github.com/containerd/containerd v1.7.27
+	github.com/containerd/containerd/api v1.8.0
+	github.com/containerd/errdefs v0.3.0
 	github.com/containerd/typeurl/v2 v2.1.1
 	github.com/dustin/go-humanize v1.0.1
 	github.com/kouhin/envflag v0.0.0-20150818174321-0e9a86061649
@@ -18,10 +21,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.11.7 // indirect
 	github.com/containerd/cgroups v1.1.0 // indirect
-	github.com/containerd/containerd v1.7.27
-	github.com/containerd/containerd/api v1.8.0 // indirect
 	github.com/containerd/continuity v0.4.4 // indirect
-	github.com/containerd/errdefs v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect

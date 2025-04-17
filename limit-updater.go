@@ -42,7 +42,7 @@ type limitUpdater struct {
 }
 
 func createLimitUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig AppConfig) (*limitUpdater, error) {
-	ch, err := createContainerdHandle(appConfig.ContainerdSocket)
+	ch, err := createContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -244,9 +244,10 @@ type containerdHandle struct {
 	client           *containerd.Client
 	containerService containers.Store
 	eventsService    containerd.EventService
+	skipSameSpec     bool
 }
 
-func createContainerdHandle(socket string) (*containerdHandle, error) {
+func createContainerdHandle(socket string, skipSameSpec bool) (*containerdHandle, error) {
 	// all pods created by k8s use k8s.io namespace in containerd
 	client, err := containerd.New(socket, containerd.WithDefaultNamespace("k8s.io"))
 	if err != nil {
@@ -261,6 +262,7 @@ func createContainerdHandle(socket string) (*containerdHandle, error) {
 		client:           client,
 		containerService: containerService,
 		eventsService:    eventsService,
+		skipSameSpec:     skipSameSpec,
 	}, nil
 }
 
@@ -332,7 +334,7 @@ func (ch *containerdHandle) updateContainer(ctx context.Context, id string, cont
 	}
 
 	burstMks := uint64(burstTime.Microseconds())
-	if spec.Linux.Resources.CPU.Burst != nil && *spec.Linux.Resources.CPU.Burst == burstMks {
+	if ch.skipSameSpec && spec.Linux.Resources.CPU.Burst != nil && *spec.Linux.Resources.CPU.Burst == burstMks {
 		logger.Debug("skipping container update: old spec value matches new one")
 		return
 	}

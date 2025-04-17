@@ -56,7 +56,9 @@ func main() {
 
 	containerUpdates := make(chan string)
 	defer close(containerUpdates)
-	go lu.ch.watchEvents(ctx, containerUpdates)
+	if appConfig.WatchContainerEvents {
+		go lu.ch.watchEvents(ctx, containerUpdates)
+	}
 
 	err = lu.watch(ctx, containerUpdates)
 	select {
@@ -68,14 +70,16 @@ func main() {
 }
 
 type AppConfig struct {
-	LogLevel         slog.Level
-	NodeName         string
-	InCluster        bool
-	WatchTimeout     time.Duration
-	Hostname         string
-	ContainerdSocket string
-	LabelSelector    string
-	BurstAnnotation  string
+	LogLevel             slog.Level
+	NodeName             string
+	InCluster            bool
+	WatchTimeout         time.Duration
+	Hostname             string
+	ContainerdSocket     string
+	LabelSelector        string
+	BurstAnnotation      string
+	SkipSameSpec         bool
+	WatchContainerEvents bool
 }
 
 func parseConfig() *AppConfig {
@@ -90,6 +94,8 @@ func parseConfig() *AppConfig {
 	flag.StringVar(&result.BurstAnnotation, "burst-annotation", "cgroup.meoe.io/burst", "Name of the annotation to parse burst config")
 	var logLevel string
 	flag.StringVar(&logLevel, "log-level", "info", "One of: error, warn, info, debug")
+	flag.BoolVar(&result.SkipSameSpec, "skip-same-spec", true, "Watcher often receives repeated updates on pods. Usually you can skip updating container on these repeated events")
+	flag.BoolVar(&result.WatchContainerEvents, "watch-container-events", true, "Runtime container spec can be updated without changes in pod. ")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
@@ -114,6 +120,10 @@ func parseConfig() *AppConfig {
 		result.LogLevel = slog.LevelDebug
 	default:
 		panic("unknown log level: " + logLevel)
+	}
+
+	if !result.SkipSameSpec && result.WatchContainerEvents {
+		panic("watch-container-events=true requires skip-same-spec=true")
 	}
 
 	return result
