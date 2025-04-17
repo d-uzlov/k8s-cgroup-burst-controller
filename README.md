@@ -90,6 +90,18 @@ metadata:
 
 For deployments, daemonsets, etc., add metadata to pod template.
 
+# Known errors
+
+Cgroup burst settings may fail to apply:
+
+```
+updateTask: runc did not terminate successfully:
+exit status 1: failed to write \"10000\":
+write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod645c13ba_18c3_46dd_a446_05c675532185.slice/cri-containerd-f513cab41c3a2736244036009794202db825dcddba6ff7f5284246e91c304d11.scope/cpu.max.burst: invalid argument\n: unknown
+```
+
+See [Requirements](#requirements) below for explanation how to solve it.
+
 # Requirements
 
 CFS CPU burst support was added to Linux kernel in the 5.14 version:
@@ -136,7 +148,7 @@ go build .
 # build image for deployment
 docker build .
 
-image_name=k8s-cgroup-burst-controller:v0.1.9
+image_name=k8s-cgroup-burst-controller:v0.1.11
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name

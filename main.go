@@ -20,17 +20,21 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-
 	appConfig := parseConfig()
+
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(slog.LevelInfo)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
 
 	logger = logger.With("host", appConfig.Hostname)
 	ctx = slogctx.NewCtx(ctx, logger)
 
 	logger.Info("using config", "config", appConfig)
-	_ = appConfig
+
+	// set log level after the 'using config' log entry, so that it is always present
+	logLevel.Set(appConfig.LogLevel)
 
 	if !appConfig.InCluster {
 		panic("running without in-cluster config is not implemented")
@@ -49,9 +53,12 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
-	for err == nil {
-		err = lu.runAndWatch(ctx)
-	}
+
+	containerUpdates := make(chan string)
+	defer close(containerUpdates)
+	go lu.ch.watchEvents(ctx, containerUpdates)
+
+	err = lu.watch(ctx, containerUpdates)
 	select {
 	case <-ctx.Done():
 		logger.Info("graceful shutdown finished")
@@ -61,6 +68,7 @@ func main() {
 }
 
 type AppConfig struct {
+	LogLevel         slog.Level
 	NodeName         string
 	InCluster        bool
 	WatchTimeout     time.Duration
@@ -80,6 +88,8 @@ func parseConfig() *AppConfig {
 	flag.StringVar(&result.ContainerdSocket, "containerd-socket", "/run/containerd/containerd.sock", "Socket to connect to in the group-burst filesystem")
 	flag.StringVar(&result.LabelSelector, "label-selector", "cgroup.meoe.io/burst=enable", "Filter pods on the node using this selector")
 	flag.StringVar(&result.BurstAnnotation, "burst-annotation", "cgroup.meoe.io/burst", "Name of the annotation to parse burst config")
+	var logLevel string
+	flag.StringVar(&logLevel, "log-level", "info", "One of: error, warn, info, debug")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
@@ -91,6 +101,19 @@ func parseConfig() *AppConfig {
 
 	if result.Hostname == "" {
 		panic("Hostname is missing")
+	}
+
+	switch logLevel {
+	case "error":
+		result.LogLevel = slog.LevelError
+	case "warn":
+		result.LogLevel = slog.LevelWarn
+	case "info":
+		result.LogLevel = slog.LevelInfo
+	case "debug":
+		result.LogLevel = slog.LevelDebug
+	default:
+		panic("unknown log level: " + logLevel)
 	}
 
 	return result

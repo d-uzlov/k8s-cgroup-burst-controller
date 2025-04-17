@@ -17,7 +17,9 @@ import (
 	"k8s.io/utils/ptr"
 
 	containerd "github.com/containerd/containerd"
+	"github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/containers"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
@@ -36,6 +38,7 @@ type limitUpdater struct {
 	ch                  *containerdHandle
 	er                  record.EventRecorder
 	lastResourceVersion string
+	containerToPod      map[string]*corev1.Pod
 }
 
 func createLimitUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig AppConfig) (*limitUpdater, error) {
@@ -50,13 +53,16 @@ func createLimitUpdater(ctx context.Context, clientset *kubernetes.Clientset, ap
 		ch:                  ch,
 		er:                  er,
 		lastResourceVersion: "0",
+		containerToPod:      map[string]*corev1.Pod{},
 	}, nil
 }
 
-func (lu *limitUpdater) runAndWatch(ctx context.Context) error {
+func (lu *limitUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
-	logger.Info("starting new watch", "from version", lu.lastResourceVersion)
-	podsWatcher, err := lu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
+
+	logger.Info("starting new watch", "from-version", lu.lastResourceVersion)
+	return lu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
+		Watch:                true,
 		SendInitialEvents:    ptr.To(true),
 		AllowWatchBookmarks:  true,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
@@ -65,64 +71,104 @@ func (lu *limitUpdater) runAndWatch(ctx context.Context) error {
 		FieldSelector:        "spec.nodeName=" + lu.appConfig.NodeName,
 		LabelSelector:        lu.appConfig.LabelSelector,
 	})
-	if err != nil {
-		return nil
-	}
-	defer podsWatcher.Stop()
-
-	return lu.watch(ctx, podsWatcher)
 }
 
-func (lu *limitUpdater) watch(ctx context.Context, watcher watch.Interface) error {
-	logger := slogctx.FromCtx(ctx)
-	for event := range watcher.ResultChan() {
-		switch event.Type {
-		case watch.Bookmark:
-			pod, ok := event.Object.(*corev1.Pod)
+func (lu *limitUpdater) watch(ctx context.Context, containerUpdates <-chan string) error {
+	watcher, err := lu.createWatcher(ctx)
+	if err != nil {
+		return err
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case podEvent, ok := <-watcher.ResultChan():
+			if !ok {
+				watcher.Stop()
+				watcher, err = lu.createWatcher(ctx)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			err = lu.handlePodEvent(ctx, podEvent)
+			if err != nil {
+				return err
+			}
+		case id, ok := <-containerUpdates:
+			if !ok {
+				return fmt.Errorf("containerd updates channel is closed")
+			}
+			pod, ok := lu.containerToPod[id]
 			if !ok {
 				continue
 			}
-			logger.Debug("bookmark received", "resource version", pod.ResourceVersion)
-			lu.lastResourceVersion = pod.ResourceVersion
-		case watch.Added:
-			err := lu.handlePodEvent(ctx, event)
+
+			callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
+
+			// the program should receive events of its own updates
+			// this is fine, because on the second iteration
+			// the program will see that there are no changes in burst spec and skip the update
+
+			// we call the full handlePod method because in case we need to emit events, we need full pod context
+			_, err = lu.handlePod(callCtx, pod)
 			if err != nil {
-				return err
+				panic("previously this pod worked fine but we got an error when updating it on event: pod " + pod.Name + ": " + err.Error())
 			}
-		case watch.Modified:
-			err := lu.handlePodEvent(ctx, event)
-			if err != nil {
-				return err
-			}
-		case watch.Deleted:
-		case watch.Error:
-			status, ok := event.Object.(*metav1.Status)
-			if !ok {
-				return fmt.Errorf("unexpected error type %T", event.Object)
-			}
-			if status.Reason == metav1.StatusReasonTimeout {
-				logger.Debug("watch timeout")
-				return nil
-			}
-			return fmt.Errorf("received error status %v", status)
-		default:
-			return fmt.Errorf("unknown event type: %s", event.Type)
 		}
 	}
-	return fmt.Errorf("watch channel ended unexpectedly")
 }
 
 func (lu *limitUpdater) handlePodEvent(ctx context.Context, event watch.Event) error {
+	logger := slogctx.FromCtx(ctx)
+	switch event.Type {
+	case watch.Bookmark:
+		pod, ok := event.Object.(*corev1.Pod)
+		if !ok {
+			return nil
+		}
+		logger.Debug("bookmark received", "resource-version", pod.ResourceVersion)
+		lu.lastResourceVersion = pod.ResourceVersion
+	case watch.Added:
+		err := lu.handlePodUpdate(ctx, event)
+		if err != nil {
+			return err
+		}
+	case watch.Modified:
+		err := lu.handlePodUpdate(ctx, event)
+		if err != nil {
+			return err
+		}
+	case watch.Deleted:
+	case watch.Error:
+		status, ok := event.Object.(*metav1.Status)
+		if !ok {
+			return fmt.Errorf("unexpected error type %T", event.Object)
+		}
+		if status.Reason == metav1.StatusReasonTimeout {
+			logger.Debug("watch timeout")
+			return nil
+		}
+		return fmt.Errorf("received error status %v", status)
+	default:
+		return fmt.Errorf("unknown event type: %s", event.Type)
+	}
+	return nil
+}
+
+func (lu *limitUpdater) handlePodUpdate(ctx context.Context, event watch.Event) error {
 	pod, ok := event.Object.(*corev1.Pod)
 	if !ok {
 		return fmt.Errorf("event object is not a pod: %T", event.Object)
 	}
+	ctx = slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace)
 	logger := slogctx.FromCtx(ctx)
-	podLogger := logger.With("pod", pod.Name, "namespace", pod.Namespace)
-	podCtx := slogctx.NewCtx(ctx, podLogger)
-	_, err := lu.handlePod(podCtx, pod)
+	_, err := lu.handlePod(ctx, pod)
 	if err != nil {
-		podLogger.Error(err.Error())
+		// error here is not propagated intentionally
+		logger.Error(err.Error())
 		lu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
 	}
 	return nil
@@ -155,6 +201,7 @@ func (lu *limitUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (changed
 	if err != nil {
 		return false, errors.Wrapf(err, "could not parse burst annotation")
 	}
+	logger.Debug("parsed burst annotation", "value", burstConfig)
 	if len(burstConfig) == 0 {
 		logger.Warn("burst annotation is empty")
 		return false, nil
@@ -163,65 +210,115 @@ func (lu *limitUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (changed
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		containerBurst, ok := burstConfig[containerStatus.Name]
 		if !ok {
+			// TODO try to remove burst from such containers
 			continue
 		}
 		containerLogger := logger.With("container", containerStatus.Name)
 
-		containerChanged, err := lu.handleContainer(ctx, containerBurst, containerStatus.ContainerID)
-		changed = changed || containerChanged
-		if err == nil {
-			if containerChanged {
-				containerLogger.Info("set burst", "value", containerBurst)
-				lu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
-			}
-		} else {
+		fullId := containerStatus.ContainerID
+		if !strings.HasPrefix(fullId, "containerd://") {
+			return false, fmt.Errorf("unexpected container ID prefix: %v", fullId)
+		}
+		rawId := strings.TrimPrefix(fullId, "containerd://")
+
+		containerChanged, err := lu.ch.updateContainer(ctx, rawId, containerBurst)
+		if err != nil {
+			// error here is not propagated intentionally
 			containerLogger.Error("failed to set burst", "value", containerBurst, "error", err.Error())
 			lu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
+			continue
 		}
+		if containerChanged {
+			changed = true
+			containerLogger.Info("set burst", "value", containerBurst)
+			lu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
+		}
+		containerLogger.Debug("saving container-to-pod mapping", "id", rawId)
+		lu.containerToPod[rawId] = pod
 	}
 
-	return
-}
-
-func (lu *limitUpdater) handleContainer(ctx context.Context, containerBurst string, fullId string) (changed bool, err error) {
-	burstF, _, err := humanize.ParseSI(containerBurst)
-	if err != nil {
-		return
-	}
-	burstTime := time.Duration(float64(time.Second) * burstF)
-
-	if !strings.HasPrefix(fullId, "containerd://") {
-		return false, fmt.Errorf("unexpected container ID prefix: %v", fullId)
-	}
-	id := strings.TrimPrefix(fullId, "containerd://")
-	changed, err = lu.ch.updateContainer(ctx, id, burstTime)
-	if err != nil {
-		return false, errors.Wrap(err, "updateTask")
-	}
 	return
 }
 
 type containerdHandle struct {
 	client           *containerd.Client
 	containerService containers.Store
+	eventsService    containerd.EventService
 }
 
 func createContainerdHandle(socket string) (*containerdHandle, error) {
+	// all pods created by k8s use k8s.io namespace in containerd
 	client, err := containerd.New(socket, containerd.WithDefaultNamespace("k8s.io"))
 	if err != nil {
 		return nil, err
 	}
 	containerService := client.ContainerService()
 
+	// Create event service client
+	eventsService := client.EventService()
+
 	return &containerdHandle{
 		client:           client,
 		containerService: containerService,
+		eventsService:    eventsService,
 	}, nil
 }
 
-func (ch *containerdHandle) updateContainer(ctx context.Context, containerId string, burstTime time.Duration) (changed bool, err error) {
+func (ch *containerdHandle) watchEvents(ctx context.Context, containerUpdates chan<- string) {
 	logger := slogctx.FromCtx(ctx)
-	ctr, err := ch.client.LoadContainer(ctx, containerId)
+
+	filters := []string{
+		`topic=="/containers/update"`,
+	}
+	eventCh, errCh := ch.eventsService.Subscribe(ctx, filters...)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt := <-eventCh:
+			// logger.Info("got event from containerd", "event", evt)
+			event, err := typeurl.UnmarshalAny(evt.Event)
+			if err != nil {
+				panic(err)
+			}
+			switch e := event.(type) {
+			case *events.ContainerUpdate:
+				logger.Debug("containerd update event", "id", e.ID)
+				select {
+				case containerUpdates <- e.ID:
+				case <-ctx.Done():
+					return
+				}
+			case *events.ContainerCreate:
+				panic("unexpected containerd create event")
+			case *events.ContainerDelete:
+				panic("unexpected containerd delete event")
+			default:
+				logger.Debug("Unhandled event type", "event", e)
+				panic("containerd unhandled event type")
+			}
+		case err := <-errCh:
+			if err == nil {
+				return
+			}
+			if errdefs.IsCanceled(err) {
+				return
+			}
+			logger.Error("Event error", "error", err.Error())
+		}
+	}
+}
+
+func (ch *containerdHandle) updateContainer(ctx context.Context, id string, containerBurst string) (changed bool, err error) {
+	logger := slogctx.FromCtx(ctx)
+
+	burstF, _, err := humanize.ParseSI(containerBurst)
+	if err != nil {
+		return
+	}
+	burstTime := time.Duration(float64(time.Second) * burstF)
+
+	ctr, err := ch.client.LoadContainer(ctx, id)
 	if err != nil {
 		return
 	}
@@ -265,7 +362,7 @@ func (ch *containerdHandle) updateContainer(ctx context.Context, containerId str
 	return
 }
 
-func setupEventRecorder(ctx context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
+func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientset.CoreV1().Events("")})
 
