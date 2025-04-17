@@ -130,21 +130,21 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 	case watch.Bookmark:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
-			return nil
+			return fmt.Errorf("unexpected error %T", event.Object)
 		}
-		logger.Debug("bookmark received", "resource-version", pod.ResourceVersion)
 		cu.lastResourceVersion = pod.ResourceVersion
-	case watch.Added:
-		err := cu.handlePodUpdate(ctx, event)
-		if err != nil {
-			return err
+	case watch.Added, watch.Modified:
+		pod, ok := event.Object.(*corev1.Pod)
+		if !ok {
+			return fmt.Errorf("event object is not a pod: %v", event.Object)
 		}
-	case watch.Modified:
-		err := cu.handlePodUpdate(ctx, event)
-		if err != nil {
-			return err
-		}
+		cu.handlePodUpdate(ctx, pod)
 	case watch.Deleted:
+		pod, ok := event.Object.(*corev1.Pod)
+		if !ok {
+			return fmt.Errorf("event object is not a pod: %v", event.Object)
+		}
+		cu.handlePodDelete(pod)
 	case watch.Error:
 		status, ok := event.Object.(*metav1.Status)
 		if !ok {
@@ -152,29 +152,34 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		}
 		if status.Reason == metav1.StatusReasonTimeout {
 			logger.Debug("watch timeout")
-			return nil
+		} else {
+			logger.Error("received error status", "value", status)
 		}
-		return fmt.Errorf("received error status %v", status)
+		return nil
 	default:
 		return fmt.Errorf("unknown event type: %s", event.Type)
 	}
 	return nil
 }
 
-func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, event watch.Event) error {
-	pod, ok := event.Object.(*corev1.Pod)
-	if !ok {
-		return fmt.Errorf("event object is not a pod: %T", event.Object)
-	}
+func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 	ctx = slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace)
-	logger := slogctx.FromCtx(ctx)
 	_, err := cu.handlePod(ctx, pod)
 	if err != nil {
 		// error here is not propagated intentionally
-		logger.Error(err.Error())
+		slogctx.FromCtx(ctx).Error(err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
 	}
-	return nil
+}
+
+func (cu *CgroupUpdater) handlePodDelete(pod *corev1.Pod) {
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		id, err := stripContainerPrefix(containerStatus.ContainerID)
+		if err != nil {
+			continue
+		}
+		delete(cu.containerToPod, id)
+	}
 }
 
 func parseMultiConfig(config string) (map[string]string, error) {
@@ -188,6 +193,14 @@ func parseMultiConfig(config string) (map[string]string, error) {
 		result[kv[0]] = kv[1]
 	}
 	return result, nil
+}
+
+func stripContainerPrefix(fullId string) (id string, err error) {
+	if !strings.HasPrefix(fullId, "containerd://") {
+		return "", fmt.Errorf("unexpected container ID prefix: %v", fullId)
+	}
+	id = strings.TrimPrefix(fullId, "containerd://")
+	return
 }
 
 func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (changed bool, err error) {
@@ -218,13 +231,12 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 		}
 		containerLogger := logger.With("container", containerStatus.Name)
 
-		fullId := containerStatus.ContainerID
-		if !strings.HasPrefix(fullId, "containerd://") {
-			return false, fmt.Errorf("unexpected container ID prefix: %v", fullId)
+		id, err := stripContainerPrefix(containerStatus.ContainerID)
+		if err != nil {
+			return false, err
 		}
-		rawId := strings.TrimPrefix(fullId, "containerd://")
 
-		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, rawId, containerBurst)
+		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, containerBurst)
 		if err != nil {
 			// error here is not propagated intentionally
 			containerLogger.Error("failed to set burst", "value", containerBurst, "error", err.Error())
@@ -236,8 +248,8 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 			containerLogger.Info("set burst", "value", containerBurst)
 			cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
 		}
-		containerLogger.Debug("saving container-to-pod mapping", "id", rawId)
-		cu.containerToPod[rawId] = pod
+		containerLogger.Debug("saving container-to-pod mapping", "id", id)
+		cu.containerToPod[id] = pod
 	}
 
 	return
