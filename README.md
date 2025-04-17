@@ -12,6 +12,20 @@ This application requires separate settings per pod,
 defines burst in seconds,
 and allows you to define different absolute burst value for each container.
 
+# Read before use
+
+This is a workaround for a missing feature in k8s 1.32.
+Future versions of k8s may include support for CPU burst, making this app obsolete.
+Track feature request status here:
+[Use Linux CFS burst to get rid of unnecessary CPU throttling](https://github.com/kubernetes/kubernetes/issues/104516)
+
+Since this is a workaround, it's not guaranteed to work perfectly.
+I did my best to make it work as best as possible but I may have missed something.
+
+A major issue with the cgroup burst itself is bad support in mainstream linux kernel.
+You _will_ need to install a custom kernel to properly use this feature.
+See details [below](#cgroup-burst-support-in-linux-kernel)
+
 # Usage example
 
 Deploy the app in your cluster:
@@ -100,9 +114,9 @@ exit status 1: failed to write \"10000\":
 write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod645c13ba_18c3_46dd_a446_05c675532185.slice/cri-containerd-f513cab41c3a2736244036009794202db825dcddba6ff7f5284246e91c304d11.scope/cpu.max.burst: invalid argument\n: unknown
 ```
 
-See [Requirements](#requirements) below for explanation how to solve it.
+You need to install a [custom linux kernel](#install-linux-kernel) to solve this.
 
-# Requirements
+# Cgroup burst support in linux kernel
 
 CFS CPU burst support was added to Linux kernel in the 5.14 version:
 https://github.com/torvalds/linux/commit/f4183717b370ad28dd0c0d74760142b20e6e7931
@@ -193,9 +207,17 @@ Kernel published here is built roughly using instructions from the previous sect
 
 ```bash
 
-sudo dpkg -i ./linux-image-unsigned-6.8.0-58-generic_6.8.0-58.60_amd64.deb ./linux-modules-6.8.0-58-generic_6.8.0-58.60_amd64.deb
+mkdir linux-ubuntu-6.8.0-58-cgroup-burst-patch
+cd linux-ubuntu-6.8.0-58-cgroup-burst-patch
+wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-6.8.0-58/linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
+unzip linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
+
+sudo dpkg -i ./*.deb
+
+rm linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
 
 # if you want to remove this kernel
+sudo dpkg -l | grep linux | grep 6.8.0-58
 sudo dpkg -P linux-image-unsigned-6.8.0-58-generic linux-modules-6.8.0-58-generic
 
 ```
