@@ -10,6 +10,7 @@ import (
 	"meoe.io/cgroup-burst/internal/appconfig"
 	"meoe.io/cgroup-burst/internal/containerdhelper"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -60,20 +61,33 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 	}, nil
 }
 
-func (lu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
+func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
 
-	logger.Info("starting new watch", "from-version", lu.lastResourceVersion)
-	return lu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
+	logger.Info("starting new watch", "from-version", cu.lastResourceVersion)
+	watcher, err = cu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 		Watch:                true,
 		SendInitialEvents:    ptr.To(true),
 		AllowWatchBookmarks:  true,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
-		ResourceVersion:      lu.lastResourceVersion,
-		TimeoutSeconds:       ptr.To(int64(lu.appConfig.WatchTimeout.Seconds())),
-		FieldSelector:        "spec.nodeName=" + lu.appConfig.NodeName,
-		LabelSelector:        lu.appConfig.LabelSelector,
+		ResourceVersion:      cu.lastResourceVersion,
+		TimeoutSeconds:       ptr.To(int64(cu.appConfig.WatchTimeout.Seconds())),
+		FieldSelector:        "spec.nodeName=" + cu.appConfig.NodeName,
+		LabelSelector:        cu.appConfig.LabelSelector,
 	})
+	if err == nil {
+		return
+	}
+	if apierrors.IsGone(err) || apierrors.IsResourceExpired(err) {
+		if cu.lastResourceVersion == "0" {
+			// prevent infinite loop
+			return
+		}
+		// lastResourceVersion has expired
+		cu.lastResourceVersion = "0"
+		return cu.createWatcher(ctx)
+	}
+	return
 }
 
 func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan string) error {
