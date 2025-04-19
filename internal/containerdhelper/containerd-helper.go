@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"k8s.io/utils/ptr"
+	"meoe.io/cgroup-burst/internal/appmetrics"
 
 	containerd "github.com/containerd/containerd"
 	"github.com/containerd/containerd/api/events"
@@ -52,7 +53,14 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 		select {
 		case <-ctx.Done():
 			return
-		case evt := <-eventCh:
+		case evt, ok := <-eventCh:
+			if !ok {
+				if ctx.Err() != nil {
+					return
+				}
+				panic("containerd event channel unexpectedly closed")
+			}
+			appmetrics.ContainerdEventsTotal.Inc()
 			// logger.Info("got event from containerd", "event", evt)
 			event, err := typeurl.UnmarshalAny(evt.Event)
 			if err != nil {
@@ -74,9 +82,15 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 				logger.Debug("Unhandled event type", "event", e)
 				panic("containerd unhandled event type")
 			}
-		case err := <-errCh:
+		case err, ok := <-errCh:
+			if !ok {
+				if ctx.Err() != nil {
+					return
+				}
+				panic("containerd error channel unexpectedly closed")
+			}
 			if err == nil {
-				return
+				continue
 			}
 			if errdefs.IsCanceled(err) {
 				return

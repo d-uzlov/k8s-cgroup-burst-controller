@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"meoe.io/cgroup-burst/internal/appconfig"
+	"meoe.io/cgroup-burst/internal/appmetrics"
 	"meoe.io/cgroup-burst/internal/containerdhelper"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -64,6 +65,7 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
 
+	appmetrics.K8sWatchStreamsTotal.Inc()
 	logger.Info("starting new watch", "from-version", cu.lastResourceVersion)
 	watcher, err = cu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 		Watch:                true,
@@ -130,9 +132,14 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			// the program will see that there are no changes in burst spec and skip the update
 
 			// we call the full handlePod method because in case we need to emit events, we need full pod context
-			_, err = cu.handlePod(callCtx, pod)
+			changed, err := cu.handlePod(callCtx, pod)
 			if err != nil {
 				panic("previously this pod worked fine but we got an error when updating it on event: pod " + pod.Name + ": " + err.Error())
+			}
+			if changed {
+				appmetrics.PodUpdatesContainerdSuccessTotal.Inc()
+			} else {
+				appmetrics.PodUpdatesContainerdSkipTotal.Inc()
 			}
 		}
 	}
@@ -146,18 +153,21 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		if !ok {
 			return fmt.Errorf("unexpected error %T", event.Object)
 		}
+		appmetrics.K8sWatchBookmarksTotal.Inc()
 		cu.lastResourceVersion = pod.ResourceVersion
 	case watch.Added, watch.Modified:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
 			return fmt.Errorf("event object is not a pod: %v", event.Object)
 		}
+		appmetrics.K8sWatchUpdatesTotal.Inc()
 		cu.handlePodUpdate(ctx, pod)
 	case watch.Deleted:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
 			return fmt.Errorf("event object is not a pod: %v", event.Object)
 		}
+		appmetrics.K8sWatchDeletesTotal.Inc()
 		cu.handlePodDelete(pod)
 	case watch.Error:
 		status, ok := event.Object.(*metav1.Status)
@@ -167,6 +177,7 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		if status.Reason == metav1.StatusReasonTimeout {
 			logger.Debug("watch timeout")
 		} else {
+			appmetrics.K8sWatchErrorsTotal.Inc()
 			logger.Error("received error status", "value", status)
 		}
 		return nil
@@ -178,11 +189,18 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 
 func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 	ctx = slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace)
-	_, err := cu.handlePod(ctx, pod)
+	changed, err := cu.handlePod(ctx, pod)
 	if err != nil {
-		// error here is not propagated intentionally
 		slogctx.FromCtx(ctx).Error(err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
+		appmetrics.PodUpdatesK8sFailTotal.Inc()
+		// error here is not propagated intentionally
+		return
+	}
+	if changed {
+		appmetrics.PodUpdatesK8sSuccessTotal.Inc()
+	} else {
+		appmetrics.PodUpdatesK8sSkipTotal.Inc()
 	}
 }
 
@@ -193,6 +211,7 @@ func (cu *CgroupUpdater) handlePodDelete(pod *corev1.Pod) {
 			continue
 		}
 		delete(cu.containerToPod, id)
+		appmetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 	}
 }
 
@@ -221,10 +240,12 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 	logger := slogctx.FromCtx(ctx)
 	pa := pod.Annotations
 	if pa == nil {
+		appmetrics.PodMissingAnnotationsTotal.Inc()
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfigRaw, ok := pa[cu.appConfig.BurstAnnotation]
 	if !ok {
+		appmetrics.PodMissingAnnotationsTotal.Inc()
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfig, err := parseMultiConfig(burstConfigRaw)
@@ -233,6 +254,7 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 	}
 	logger.Debug("parsed burst annotation", "value", burstConfig)
 	if len(burstConfig) == 0 {
+		appmetrics.PodMissingAnnotationsTotal.Inc()
 		logger.Warn("burst annotation is empty")
 		return false, nil
 	}
@@ -243,6 +265,7 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 			// TODO try to remove burst from such containers
 			continue
 		}
+		delete(burstConfig, containerStatus.Name)
 		containerLogger := logger.With("container", containerStatus.Name)
 
 		id, err := stripContainerPrefix(containerStatus.ContainerID)
@@ -252,18 +275,27 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 
 		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, containerBurst)
 		if err != nil {
+			appmetrics.ContainerUpdateAttemptsFailTotal.Inc()
 			// error here is not propagated intentionally
 			containerLogger.Error("failed to set burst", "value", containerBurst, "error", err.Error())
 			cu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
 			continue
 		}
 		if containerChanged {
+			appmetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
 			changed = true
 			containerLogger.Info("set burst", "value", containerBurst)
 			cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
+		} else {
+			appmetrics.ContainerUpdateAttemptsSkipTotal.Inc()
 		}
 		containerLogger.Debug("saving container-to-pod mapping", "id", id)
 		cu.containerToPod[id] = pod
+		appmetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+	}
+	if len(burstConfig) != 0 {
+		logger.Warn("part of annotation is not used", "remaining", burstConfig)
+		appmetrics.PodUnusedAnnotationsTotal.Inc()
 	}
 
 	return

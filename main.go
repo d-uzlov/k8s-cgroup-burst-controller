@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime/metrics"
 	"syscall"
 
 	"k8s.io/client-go/kubernetes"
@@ -12,6 +14,8 @@ import (
 
 	"meoe.io/cgroup-burst/internal/appconfig"
 	"meoe.io/cgroup-burst/internal/k8swatcher"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	slogctx "github.com/veqryn/slog-context"
 )
@@ -60,11 +64,21 @@ func main() {
 		go cu.ContainerdHelper.WatchEvents(ctx, containerUpdates)
 	}
 
-	err = cu.Watch(ctx, containerUpdates)
-	select {
-	case <-ctx.Done():
-		logger.Info("graceful shutdown finished")
-	default:
+	http.Handle("/metrics", promhttp.Handler())
+	metricsAddress := ":2112"
+	go func() {
+		logger.Info("started metrics listener", "address", metricsAddress)
+		err := http.ListenAndServe(metricsAddress, nil)
+		if ctx.Err() != nil {
+			return
+		}
 		panic(err.Error())
+	}()
+
+	err = cu.Watch(ctx, containerUpdates)
+	if ctx.Err() != nil {
+		logger.Info("graceful shutdown finished")
+		return
 	}
+	panic(err.Error())
 }

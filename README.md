@@ -33,6 +33,9 @@ Deploy the app in your cluster:
 ```bash
 
 kubectl create ns cgroup-burst
+# cgroup-burst needs access to hostPath volumes to access containerd directly
+kubectl label ns cgroup-burst pod-security.kubernetes.io/enforce=privileged
+
 kubectl apply -f https://github.com/d-uzlov/k8s-cgroup-burst-operator/raw/refs/heads/main/deployment/rbac.yaml
 kubectl apply -f https://github.com/d-uzlov/k8s-cgroup-burst-operator/raw/refs/heads/main/deployment/daemonset.yaml
 
@@ -168,7 +171,7 @@ CGO_ENABLED=0 go build .
 # build image for deployment
 docker build .
 
-image_name=k8s-cgroup-burst-controller:v0.1.13
+image_name=k8s-cgroup-burst-controller:v0.1.14
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name
