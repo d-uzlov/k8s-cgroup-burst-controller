@@ -125,6 +125,13 @@ write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-
 
 You need to install a [custom linux kernel](#install-linux-kernel) to solve this.
 
+# Metrics
+
+App provides several types of metrics:
+- Own metrics. Prefixed with `cgroup_burst_`
+- Pod spec metrics. Tries to mimic kube-state-metrics
+- - `kube_pod_container_cgroup_burst`
+
 # Cgroup burst support in linux kernel
 
 CFS CPU burst support was added to Linux kernel in the 5.14 version:
