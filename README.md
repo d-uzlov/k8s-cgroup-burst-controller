@@ -171,7 +171,7 @@ CGO_ENABLED=0 go build .
 # build image for deployment
 docker build .
 
-image_name=k8s-cgroup-burst-controller:v0.1.29
+image_name=k8s-cgroup-burst-controller:v0.1.31
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name

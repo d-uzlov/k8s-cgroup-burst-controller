@@ -102,10 +102,12 @@ func main() {
 	}
 
 	ownRegistry := prometheus.NewRegistry()
+	containerRegistry := prometheus.NewRegistry()
 
 	ownMetrics := appmetrics.NewOwnMetrics(ownRegistry)
+	containerMetrics := appmetrics.NewContainerMetrics(containerRegistry)
 
-	cu, err := k8swatcher.CreateCgroupUpdater(ctx, clientset, *appConfig, ownMetrics)
+	cu, err := k8swatcher.CreateCgroupUpdater(ctx, clientset, *appConfig, ownMetrics, containerMetrics)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -120,17 +122,24 @@ func main() {
 		go cu.ContainerdHelper.WatchEvents(ctx, containerUpdates)
 	}
 
+	logger.Info("add default metrics handler", "address", appConfig.MetricsAddress, "path", "/default_metrics")
+	http.Handle("/default_metrics", promhttp.Handler())
+	logger.Info("add own metrics handler", "address", appConfig.MetricsAddress, "path", "/metrics")
 	http.Handle("/metrics", promhttp.HandlerFor(ownRegistry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 	}))
-	metricsAddress := ":2112"
+	logger.Info("add container metrics handler", "address", appConfig.MetricsAddress, "path", "/container_metrics")
+	http.Handle("/container_metrics", promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
+		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
+	}))
 	go func() {
-		logger.Info("started metrics listener", "address", metricsAddress)
-		err := http.ListenAndServe(metricsAddress, nil)
+		err := http.ListenAndServe(appConfig.MetricsAddress, nil)
 		if ctx.Err() != nil {
 			return
 		}
-		panic(err.Error())
+		if err != nil {
+			panic(err.Error())
+		}
 	}()
 
 	err = cu.Watch(ctx, containerUpdates)
@@ -138,5 +147,7 @@ func main() {
 		logger.Info("graceful shutdown finished")
 		return
 	}
-	panic(err.Error())
+	if err != nil {
+		panic(err.Error())
+	}
 }

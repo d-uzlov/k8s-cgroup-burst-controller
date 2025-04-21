@@ -38,6 +38,7 @@ type CgroupUpdater struct {
 	lastResourceVersion string
 	containerToPod      map[string]*corev1.Pod
 	ownMetrics          *appmetrics.OwnMetrics
+	containerMetrics    *appmetrics.ContainerMetrics
 }
 
 func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
@@ -48,7 +49,7 @@ func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, host
 	return eventRecorder
 }
 
-func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig appconfig.AppConfig, ownMetrics *appmetrics.OwnMetrics) (*CgroupUpdater, error) {
+func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig appconfig.AppConfig, ownMetrics *appmetrics.OwnMetrics, containerMetrics *appmetrics.ContainerMetrics) (*CgroupUpdater, error) {
 	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, ownMetrics)
 	if err != nil {
 		return nil, err
@@ -62,6 +63,7 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 		lastResourceVersion: "0",
 		containerToPod:      map[string]*corev1.Pod{},
 		ownMetrics:          ownMetrics,
+		containerMetrics:    containerMetrics,
 	}, nil
 }
 
@@ -214,6 +216,7 @@ func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 	logger := slogctx.FromCtx(ctx).With("namespace", pod.Namespace, "pod", pod.Name)
 	for _, containerStatus := range pod.Status.ContainerStatuses {
+		_ = cu.containerMetrics.SpecCgroupBurst.DeleteLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name)
 		id, err := stripContainerPrefix(containerStatus.ContainerID)
 		if err != nil {
 			// error here is not propagated intentionally
@@ -286,6 +289,8 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 		if err != nil {
 			return changed, err
 		}
+
+		cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
 
 		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, burstSeconds)
 		if err != nil {

@@ -21,8 +21,7 @@ type AppConfig struct {
 	BurstAnnotation         string
 	SkipSameSpec            bool
 	WatchContainerEvents    bool
-	OwnMetricsAddress       string
-	ContainerMetricsAddress string
+	MetricsAddress          string
 }
 
 func ParseConfig() *AppConfig {
@@ -41,8 +40,7 @@ func ParseConfig() *AppConfig {
 	flag.StringVar(&logLevel, "log-level", "info", "One of: error, warn, info, debug")
 	flag.BoolVar(&result.SkipSameSpec, "skip-same-spec", true, "Watcher sometimes receives repeated updates on pods. Usually you can skip updating container on these repeated events")
 	flag.BoolVar(&result.WatchContainerEvents, "watch-container-events", true, "Runtime container spec can sometimes be updated without changes in pod")
-	flag.StringVar(&result.OwnMetricsAddress, "own-metrics-address", ":2112", "Address to listen on for own app metrics")
-	flag.StringVar(&result.ContainerMetricsAddress, "container-metrics-address", ":2113", "Address to listen on for container metrics")
+	flag.StringVar(&result.MetricsAddress, "own-metrics-address", ":2112", "Address to listen on for app metrics")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
