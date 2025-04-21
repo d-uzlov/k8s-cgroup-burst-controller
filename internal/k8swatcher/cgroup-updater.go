@@ -65,6 +65,10 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 	}, nil
 }
 
+func (cu *CgroupUpdater) Close() {
+	cu.ContainerdHelper.Close()
+}
+
 func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
 
@@ -134,8 +138,8 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			// this is fine, because on the second iteration
 			// the program will see that there are no changes in burst spec and skip the update
 
-			// we call the full handlePod method because in case we need to emit events, we need full pod context
-			changed, err := cu.handlePod(callCtx, pod)
+			// we call the full updatePod method because in case we need to emit events, we need full pod context
+			changed, err := cu.UpdatePod(callCtx, pod)
 			if err != nil {
 				panic("previously this pod worked fine but we got an error when updating it on event: pod " + pod.Name + ": " + err.Error())
 			}
@@ -192,7 +196,7 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 
 func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 	ctx = slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace)
-	changed, err := cu.handlePod(ctx, pod)
+	changed, err := cu.UpdatePod(ctx, pod)
 	if err != nil {
 		slogctx.FromCtx(ctx).Error(err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
@@ -212,6 +216,7 @@ func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		id, err := stripContainerPrefix(containerStatus.ContainerID)
 		if err != nil {
+			// error here is not propagated intentionally
 			logger.Error("can't parse container ID on pod deletion", "value", containerStatus.ContainerID)
 			continue
 		}
@@ -241,7 +246,7 @@ func stripContainerPrefix(fullId string) (id string, err error) {
 	return
 }
 
-func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (changed bool, err error) {
+func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (changed bool, err error) {
 	logger := slogctx.FromCtx(ctx)
 	pa := pod.Annotations
 	if pa == nil {

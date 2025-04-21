@@ -2,6 +2,7 @@ package containerdhelper
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"k8s.io/utils/ptr"
@@ -12,6 +13,7 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
+	"github.com/pkg/errors"
 	slogctx "github.com/veqryn/slog-context"
 )
 
@@ -21,6 +23,10 @@ type ContainerdHelper struct {
 	eventsService    containerd.EventService
 	skipSameSpec     bool
 	ownMetrics       *appmetrics.OwnMetrics
+}
+
+func (h *ContainerdHelper) Close() {
+	h.client.Close()
 }
 
 func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmetrics.OwnMetrics) (*ContainerdHelper, error) {
@@ -147,4 +153,32 @@ func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burst
 	logger.Debug("spec update successful")
 
 	return
+}
+
+func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName string, podNamespace string, burstSeconds float64) (err error) {
+	logger := slogctx.FromCtx(ctx).With("source", "UpdateContainerByName", "pod", podName, "namespace", podNamespace)
+
+	filter := fmt.Sprintf(
+		`labels."io.kubernetes.pod.name"=="%s",labels."io.kubernetes.pod.namespace"=="%s"`,
+		podName,
+		podNamespace,
+	)
+	containers, err := h.client.Containers(ctx, filter)
+	if err != nil {
+		return errors.Wrap(err, "failed to list containers")
+	}
+
+	if len(containers) == 0 {
+		return fmt.Errorf("pod not found")
+	}
+
+	for _, container := range containers {
+		id := container.ID()
+		logger.Debug("found matching container", "container-id", id)
+		_, err = h.UpdateContainer(ctx, id, burstSeconds)
+		if err != nil {
+			logger.Error("could not update container", "container-id", id, "error", err.Error())
+		}
+	}
+	return nil
 }

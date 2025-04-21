@@ -39,6 +39,16 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
+        - name: OWN_BOOST_ON_STARTUP
+          value: 20m
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: CONTAINERD_SOCKET
           value: /run/containerd/containerd.sock
         - name: WATCH_TIMEOUT
