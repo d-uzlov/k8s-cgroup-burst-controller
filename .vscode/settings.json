@@ -11,6 +11,7 @@
     "containerdhelper",
     "corev1",
     "crictl",
+    "daemonset",
     "devscripts",
     "dkms",
     "dpkg",

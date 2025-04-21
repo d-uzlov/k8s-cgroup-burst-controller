@@ -23,7 +23,7 @@ Since this is a workaround, it's not guaranteed to work perfectly.
 I did my best to make it work as best as possible but I may have missed something.
 
 A major issue with the cgroup burst itself is bad support in mainstream linux kernel.
-You _will_ need to install a custom kernel to properly use this feature.
+If you want to fix throttling, you _will_ need to install a custom kernel.
 See details [below](#cgroup-burst-support-in-linux-kernel)
 
 # Usage example
@@ -55,8 +55,8 @@ Enable burst for a specific pod:
 ```bash
 
 # select a pod
-pod_name=
 pod_namespace=
+pod_name=
 
 # choose a container in the pod
 container_name=
@@ -75,7 +75,7 @@ kubectl -n $pod_namespace describe pod $pod_name
 If more than one container in the pod needs burst, then you can set values for each of them:
 `container-1=10ms,container-2=20ms,container-3=30ms`
 
-You can check the cAdvisor metrics `rate(container_cpu_cfs_throttled_periods_total)`.
+You can check cAdvisor metrics: `rate(container_cpu_cfs_throttled_periods_total)`.
 After applying burst settings the rate should consistently drop.
 But depending on your application you may need to set a relatively large burst to reduce the rate to 0.
 
@@ -120,10 +120,12 @@ Cgroup burst settings may fail to apply:
 ```
 updateTask: runc did not terminate successfully:
 exit status 1: failed to write \"10000\":
-write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod645c13ba_18c3_46dd_a446_05c675532185.slice/cri-containerd-f513cab41c3a2736244036009794202db825dcddba6ff7f5284246e91c304d11.scope/cpu.max.burst: invalid argument\n: unknown
+write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod645c13ba_18c3_46dd_a446_05c675532185.slice/cri-containerd-f513cab41c3a2736244036009794202db825dcddba6ff7f5284246e91c304d11.scope/cpu.max.burst:
+invalid argument\n: unknown
 ```
 
 You need to install a [custom linux kernel](#install-linux-kernel) to solve this.
+See [Cgroup burst support in linux kernel](#cgroup-burst-support-in-linux-kernel) for details of what is causing this.
 
 # Metrics
 
@@ -137,9 +139,11 @@ App provides several types of metrics:
 
 Cgroup statistics are disabled by default.
 They require that the container is running with `securityContext.privileged=true`,
-and host `/proc` must be mounted into the container.
+and you need to mount host `/proc` into container filesystem.
 
 This is required to find the cgroup path of the container.
+
+Here is an example of deployment with Cgroup statistics enabled: [daemonset-cgroup-metrics.yaml](./deployment/daemonset-cgroup-metrics.yaml)
 
 TODO it may be possible to get cgroup path from container spec: `spec.linux.cgroupPath`.
 But the format is different, and how the format translates to filesystem seems to change over time.
@@ -148,8 +152,6 @@ Example:
 - format 1: `/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc.scope`
 - format 2: `/kubepods/burstable/podf6a32139-8482-42e2-9c9b-6269fed32a26/34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
 - format 3: `/system.slice/containerd.service/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
-
-Here is an example of deployment with Cgroup statistics enabled: [daemonset-cgroup-metrics.yaml](./deployment/daemonset-cgroup-metrics.yaml)
 
 # Cgroup burst support in linux kernel
 
