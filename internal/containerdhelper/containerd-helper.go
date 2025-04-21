@@ -8,7 +8,7 @@ import (
 	"k8s.io/utils/ptr"
 	"meoe.io/cgroup-burst/internal/appmetrics"
 
-	containerd "github.com/containerd/containerd"
+	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/errdefs"
@@ -23,13 +23,15 @@ type ContainerdHelper struct {
 	eventsService    containerd.EventService
 	skipSameSpec     bool
 	ownMetrics       *appmetrics.OwnMetrics
+	cgroupRoot       string
+	procRoot         string
 }
 
 func (h *ContainerdHelper) Close() {
 	h.client.Close()
 }
 
-func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmetrics.OwnMetrics) (*ContainerdHelper, error) {
+func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmetrics.OwnMetrics, cgroupRoot string, procRoot string) (*ContainerdHelper, error) {
 	// all pods created by k8s use k8s.io namespace in containerd
 	client, err := containerd.New(socket, containerd.WithDefaultNamespace("k8s.io"))
 	if err != nil {
@@ -37,7 +39,6 @@ func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmet
 	}
 	containerService := client.ContainerService()
 
-	// Create event service client
 	eventsService := client.EventService()
 
 	return &ContainerdHelper{
@@ -46,6 +47,8 @@ func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmet
 		eventsService:    eventsService,
 		skipSameSpec:     skipSameSpec,
 		ownMetrics:       ownMetrics,
+		cgroupRoot:       cgroupRoot,
+		procRoot:         procRoot,
 	}, nil
 }
 
@@ -181,4 +184,25 @@ func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName st
 		}
 	}
 	return nil
+}
+
+type CgroupBurstReader func() (nrBurst, burstSeconds float64, err error)
+
+func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) (CgroupBurstReader, error) {
+	ctr, err := h.client.LoadContainer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	task, err := ctr.Task(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	pid := int(task.Pid())
+
+	slogctx.FromCtx(ctx).Debug("creating cgroup reader", "container-id", id, "pid", pid)
+
+	result := func() (nrBurst float64, burstSeconds float64, err error) {
+		return GetCPUMetrics(h.cgroupRoot, h.procRoot, pid)
+	}
+	return result, nil
 }

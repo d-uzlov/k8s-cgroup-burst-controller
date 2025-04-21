@@ -131,6 +131,25 @@ App provides several types of metrics:
 - Own metrics. Prefixed with `cgroup_burst_`
 - Pod spec metrics. Tries to mimic kube-state-metrics
 - - `kube_pod_container_cgroup_burst`
+- Cgroup statistics. Tries to mimic cAdvisor metrics
+- - `container_cpu_cgroup_burst_periods_total`
+- - `container_cpu_cgroup_burst_seconds_total`
+
+Cgroup statistics are disabled by default.
+They require that the container is running with `securityContext.privileged=true`,
+and host `/proc` must be mounted into the container.
+
+This is required to find the cgroup path of the container.
+
+TODO it may be possible to get cgroup path from container spec: `spec.linux.cgroupPath`.
+But the format is different, and how the format translates to filesystem seems to change over time.
+Example:
+- spec format: `kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice:cri-containerd:34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+- format 1: `/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc.scope`
+- format 2: `/kubepods/burstable/podf6a32139-8482-42e2-9c9b-6269fed32a26/34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+- format 3: `/system.slice/containerd.service/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+
+Here is an example of deployment with Cgroup statistics enabled: [daemonset-cgroup-metrics.yaml](./deployment/daemonset-cgroup-metrics.yaml)
 
 # Cgroup burst support in linux kernel
 
@@ -178,7 +197,7 @@ CGO_ENABLED=0 go build .
 # build image for deployment
 docker build .
 
-image_name=k8s-cgroup-burst-controller:v0.1.31
+image_name=k8s-cgroup-burst-controller:v0.1.46
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name

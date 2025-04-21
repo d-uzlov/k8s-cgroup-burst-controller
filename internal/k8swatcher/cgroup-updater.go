@@ -3,6 +3,7 @@ package k8swatcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	slogctx "github.com/veqryn/slog-context"
 )
 
@@ -36,9 +38,16 @@ type CgroupUpdater struct {
 	ContainerdHelper    *containerdhelper.ContainerdHelper
 	er                  record.EventRecorder
 	lastResourceVersion string
-	containerToPod      map[string]*corev1.Pod
+	containerToPod      map[string]*podCacheEntry
 	ownMetrics          *appmetrics.OwnMetrics
 	containerMetrics    *appmetrics.ContainerMetrics
+}
+
+type podCacheEntry struct {
+	pod    *corev1.Pod
+	reader containerdhelper.CgroupBurstReader
+	labels prometheus.Labels
+	logger *slog.Logger
 }
 
 func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
@@ -50,7 +59,7 @@ func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, host
 }
 
 func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig appconfig.AppConfig, ownMetrics *appmetrics.OwnMetrics, containerMetrics *appmetrics.ContainerMetrics) (*CgroupUpdater, error) {
-	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, ownMetrics)
+	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, ownMetrics, appConfig.CgroupRoot, appConfig.ProcRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +70,7 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 		ContainerdHelper:    ch,
 		er:                  er,
 		lastResourceVersion: "0",
-		containerToPod:      map[string]*corev1.Pod{},
+		containerToPod:      map[string]*podCacheEntry{},
 		ownMetrics:          ownMetrics,
 		containerMetrics:    containerMetrics,
 	}, nil
@@ -129,10 +138,11 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			if !ok {
 				return fmt.Errorf("containerd updates channel is closed")
 			}
-			pod, ok := cu.containerToPod[id]
+			podEntry, ok := cu.containerToPod[id]
 			if !ok {
 				continue
 			}
+			pod := podEntry.pod
 
 			callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
 
@@ -223,9 +233,18 @@ func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 			logger.Error("can't parse container ID on pod deletion", "value", containerStatus.ContainerID)
 			continue
 		}
-		delete(cu.containerToPod, id)
-		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+		cu.deleteFromCache(id)
 	}
+}
+func (cu *CgroupUpdater) deleteFromCache(id string) {
+	cacheEntry, ok := cu.containerToPod[id]
+	if !ok {
+		return
+	}
+	cu.containerMetrics.CgroupBurstNr.Delete(cacheEntry.labels)
+	cu.containerMetrics.CgroupBurstSeconds.Delete(cacheEntry.labels)
+	delete(cu.containerToPod, id)
+	cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 }
 
 func parseMultiConfig(config string) (map[string]string, error) {
@@ -273,44 +292,8 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 	}
 	logger.Debug("found matching pod")
 	for _, containerStatus := range pod.Status.ContainerStatuses {
-		containerBurst, ok := burstConfig[containerStatus.Name]
-		if !ok {
-			containerBurst = "0"
-		}
-		delete(burstConfig, containerStatus.Name)
-		containerLogger := logger.With("container", containerStatus.Name)
-
-		id, err := stripContainerPrefix(containerStatus.ContainerID)
-		if err != nil {
-			return changed, err
-		}
-
-		burstSeconds, _, err := humanize.ParseSI(containerBurst)
-		if err != nil {
-			return changed, err
-		}
-
-		cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
-
-		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, burstSeconds)
-		if err != nil {
-			cu.ownMetrics.ContainerUpdateAttemptsFailTotal.Inc()
-			// error here is not propagated intentionally
-			containerLogger.Error("failed to set burst", "value", containerBurst, "error", err.Error())
-			cu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
-			continue
-		}
-		if containerChanged {
-			cu.ownMetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
-			changed = true
-			containerLogger.Info("set burst", "value", containerBurst)
-			cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
-		} else {
-			cu.ownMetrics.ContainerUpdateAttemptsSkipTotal.Inc()
-		}
-		containerLogger.Debug("saving container-to-pod mapping", "id", id)
-		cu.containerToPod[id] = pod
-		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+		containerChanged := cu.updateContainer(ctx, pod, containerStatus, burstConfig)
+		changed = changed || containerChanged
 	}
 	if len(burstConfig) != 0 {
 		logger.Warn("part of annotation is not used", "remaining", burstConfig)
@@ -318,4 +301,88 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 	}
 
 	return
+}
+
+func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, containerStatus corev1.ContainerStatus, burstConfig map[string]string) (changed bool) {
+	logger := slogctx.FromCtx(ctx).With("container", containerStatus.Name)
+	var err error
+	burstSeconds := 0.0
+	burstString, ok := burstConfig[containerStatus.Name]
+	if ok {
+		delete(burstConfig, containerStatus.Name)
+		burstSeconds, _, err = humanize.ParseSI(burstString)
+		if err != nil {
+			logger.Error("could not parse annotation", "value", burstString, "error", err.Error())
+			return false
+		}
+	}
+
+	id, err := stripContainerPrefix(containerStatus.ContainerID)
+	if err != nil {
+		logger.Error("could not parse container ID", "value", containerStatus.ContainerID, "error", err.Error())
+		return false
+	}
+
+	cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
+
+	changed, err = cu.ContainerdHelper.UpdateContainer(ctx, id, burstSeconds)
+	if err != nil {
+		cu.ownMetrics.ContainerUpdateAttemptsFailTotal.Inc()
+		// error here is not propagated intentionally
+		logger.Error("failed to set burst", "value", burstString, "error", err.Error())
+		cu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
+		return
+	}
+	if changed {
+		cu.ownMetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
+		logger.Info("set burst", "value", burstString)
+		cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+burstString)
+	} else {
+		cu.ownMetrics.ContainerUpdateAttemptsSkipTotal.Inc()
+	}
+	if burstSeconds == 0 {
+		cu.deleteFromCache(id)
+		return
+	}
+	logger.Debug("saving container-to-pod mapping", "id", id)
+	gatherMetrics, err := cu.ContainerdHelper.GetCgroupBurstReader(ctx, id)
+	if err != nil {
+		logger.Error("could not get cgroup reader")
+		gatherMetrics = nil
+	}
+	cacheEntry, ok := cu.containerToPod[id]
+	if !ok {
+		cacheEntry = &podCacheEntry{
+			reader: gatherMetrics,
+			labels: prometheus.Labels{
+				"node":      cu.appConfig.NodeName,
+				"namespace": pod.Namespace,
+				"pod":       pod.Name,
+				"container": containerStatus.Name,
+				"name":      id,
+			},
+			logger: logger,
+		}
+		cu.containerToPod[id] = cacheEntry
+		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+	}
+	cacheEntry.pod = pod
+	return
+}
+
+func (cu *CgroupUpdater) GatherCgroupBurst() {
+	for _, v := range cu.containerToPod {
+		if v.reader == nil {
+			continue
+		}
+		nrBurst, burstSeconds, err := v.reader()
+		if err != nil {
+			v.logger.Error("could not read cgroup metrics", "error", err.Error())
+			cu.containerMetrics.CgroupBurstNr.Delete(v.labels)
+			cu.containerMetrics.CgroupBurstSeconds.Delete(v.labels)
+			continue
+		}
+		cu.containerMetrics.CgroupBurstNr.With(v.labels).Set(nrBurst)
+		cu.containerMetrics.CgroupBurstSeconds.With(v.labels).Set(burstSeconds)
+	}
 }

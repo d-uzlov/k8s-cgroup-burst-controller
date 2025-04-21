@@ -36,7 +36,7 @@ import (
 // The startup latency is predictable and it's even slightly lower
 // than lowest possible latency in the best case with k8s watch that returns current pod as the first.
 func setStartupBurst(ctx context.Context, appConfig *appconfig.AppConfig) {
-	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, nil)
+	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, nil, "", "")
 	if err != nil {
 		panic(err)
 	}
@@ -129,9 +129,15 @@ func main() {
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 	}))
 	logger.Info("add container metrics handler", "address", appConfig.MetricsAddress, "path", "/container_metrics")
-	http.Handle("/container_metrics", promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
+	prometheusHandler := promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
-	}))
+	})
+	containerMetricsHandler := prometheusHandler
+	if appConfig.EnableCgroupMetrics {
+		logger.Info("adding cgroup gathering before /container_metrics endpoint")
+		containerMetricsHandler = NewInterceptHandler(prometheusHandler, cu.GatherCgroupBurst)
+	}
+	http.Handle("/container_metrics", containerMetricsHandler)
 	go func() {
 		err := http.ListenAndServe(appConfig.MetricsAddress, nil)
 		if ctx.Err() != nil {
@@ -150,4 +156,21 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
+}
+
+type InterceptHandler struct {
+	handler http.Handler
+	update  func()
+}
+
+func NewInterceptHandler(handler http.Handler, update func()) *InterceptHandler {
+	return &InterceptHandler{
+		handler: handler,
+		update:  update,
+	}
+}
+
+func (h InterceptHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.update()
+	h.handler.ServeHTTP(w, r)
 }

@@ -9,19 +9,22 @@ import (
 )
 
 type AppConfig struct {
-	LogLevel                slog.Level
-	NodeName                string
-	PodName                 string
-	PodNamespace            string
-	InCluster               bool
-	WatchTimeout            time.Duration
-	Hostname                string
-	ContainerdSocket        string
-	LabelSelector           string
-	BurstAnnotation         string
-	SkipSameSpec            bool
-	WatchContainerEvents    bool
-	MetricsAddress          string
+	LogLevel             slog.Level
+	NodeName             string
+	PodName              string
+	PodNamespace         string
+	InCluster            bool
+	WatchTimeout         time.Duration
+	Hostname             string
+	ContainerdSocket     string
+	LabelSelector        string
+	BurstAnnotation      string
+	SkipSameSpec         bool
+	WatchContainerEvents bool
+	MetricsAddress       string
+	EnableCgroupMetrics  bool
+	CgroupRoot           string
+	ProcRoot             string
 }
 
 func ParseConfig() *AppConfig {
@@ -41,6 +44,11 @@ func ParseConfig() *AppConfig {
 	flag.BoolVar(&result.SkipSameSpec, "skip-same-spec", true, "Watcher sometimes receives repeated updates on pods. Usually you can skip updating container on these repeated events")
 	flag.BoolVar(&result.WatchContainerEvents, "watch-container-events", true, "Runtime container spec can sometimes be updated without changes in pod")
 	flag.StringVar(&result.MetricsAddress, "own-metrics-address", ":2112", "Address to listen on for app metrics")
+	flag.BoolVar(&result.EnableCgroupMetrics, "enable-cgroup-metrics", false, "Gather cgroup metrics for affected container from filesystem. "+
+		"Requires that /proc is mounted from host filesystem. Specify path via -proc-root. Alternatively, set hostPID=true. "+
+		"Requires container.securityContext.privileged=true. WIthout privileged mode container is running in its own cgroup namespace")
+	flag.StringVar(&result.CgroupRoot, "cgroup-root", "/sys/fs/cgroup", "Path to the root of the cgroup mount. Usually don't need to be changed")
+	flag.StringVar(&result.ProcRoot, "proc-root", "/proc", "Path to the root of the /proc mount. When running in a container this should point to /proc mounted from host")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
