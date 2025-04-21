@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 
+	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 	slogctx "github.com/veqryn/slog-context"
 )
@@ -36,6 +37,7 @@ type CgroupUpdater struct {
 	er                  record.EventRecorder
 	lastResourceVersion string
 	containerToPod      map[string]*corev1.Pod
+	ownMetrics          *appmetrics.OwnMetrics
 }
 
 func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
@@ -46,8 +48,8 @@ func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, host
 	return eventRecorder
 }
 
-func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig appconfig.AppConfig) (*CgroupUpdater, error) {
-	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec)
+func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, appConfig appconfig.AppConfig, ownMetrics *appmetrics.OwnMetrics) (*CgroupUpdater, error) {
+	ch, err := containerdhelper.CreateContainerdHandle(appConfig.ContainerdSocket, appConfig.SkipSameSpec, ownMetrics)
 	if err != nil {
 		return nil, err
 	}
@@ -59,13 +61,14 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 		er:                  er,
 		lastResourceVersion: "0",
 		containerToPod:      map[string]*corev1.Pod{},
+		ownMetrics:          ownMetrics,
 	}, nil
 }
 
 func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
 
-	appmetrics.K8sWatchStreamsTotal.Inc()
+	cu.ownMetrics.K8sWatchStreamsTotal.Inc()
 	logger.Info("starting new watch", "from-version", cu.lastResourceVersion)
 	watcher, err = cu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 		Watch:                true,
@@ -137,9 +140,9 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 				panic("previously this pod worked fine but we got an error when updating it on event: pod " + pod.Name + ": " + err.Error())
 			}
 			if changed {
-				appmetrics.PodUpdatesContainerdSuccessTotal.Inc()
+				cu.ownMetrics.PodUpdatesContainerdSuccessTotal.Inc()
 			} else {
-				appmetrics.PodUpdatesContainerdSkipTotal.Inc()
+				cu.ownMetrics.PodUpdatesContainerdSkipTotal.Inc()
 			}
 		}
 	}
@@ -153,22 +156,22 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		if !ok {
 			return fmt.Errorf("unexpected error %T", event.Object)
 		}
-		appmetrics.K8sWatchBookmarksTotal.Inc()
+		cu.ownMetrics.K8sWatchBookmarksTotal.Inc()
 		cu.lastResourceVersion = pod.ResourceVersion
 	case watch.Added, watch.Modified:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
 			return fmt.Errorf("event object is not a pod: %v", event.Object)
 		}
-		appmetrics.K8sWatchUpdatesTotal.Inc()
+		cu.ownMetrics.K8sWatchUpdatesTotal.Inc()
 		cu.handlePodUpdate(ctx, pod)
 	case watch.Deleted:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
 			return fmt.Errorf("event object is not a pod: %v", event.Object)
 		}
-		appmetrics.K8sWatchDeletesTotal.Inc()
-		cu.handlePodDelete(pod)
+		cu.ownMetrics.K8sWatchDeletesTotal.Inc()
+		cu.handlePodDelete(ctx, pod)
 	case watch.Error:
 		status, ok := event.Object.(*metav1.Status)
 		if !ok {
@@ -177,7 +180,7 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		if status.Reason == metav1.StatusReasonTimeout {
 			logger.Debug("watch timeout")
 		} else {
-			appmetrics.K8sWatchErrorsTotal.Inc()
+			cu.ownMetrics.K8sWatchErrorsTotal.Inc()
 			logger.Error("received error status", "value", status)
 		}
 		return nil
@@ -193,25 +196,27 @@ func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 	if err != nil {
 		slogctx.FromCtx(ctx).Error(err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
-		appmetrics.PodUpdatesK8sFailTotal.Inc()
+		cu.ownMetrics.PodUpdatesK8sFailTotal.Inc()
 		// error here is not propagated intentionally
 		return
 	}
 	if changed {
-		appmetrics.PodUpdatesK8sSuccessTotal.Inc()
+		cu.ownMetrics.PodUpdatesK8sSuccessTotal.Inc()
 	} else {
-		appmetrics.PodUpdatesK8sSkipTotal.Inc()
+		cu.ownMetrics.PodUpdatesK8sSkipTotal.Inc()
 	}
 }
 
-func (cu *CgroupUpdater) handlePodDelete(pod *corev1.Pod) {
+func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
+	logger := slogctx.FromCtx(ctx).With("namespace", pod.Namespace, "pod", pod.Name)
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		id, err := stripContainerPrefix(containerStatus.ContainerID)
 		if err != nil {
+			logger.Error("can't parse container ID on pod deletion", "value", containerStatus.ContainerID)
 			continue
 		}
 		delete(cu.containerToPod, id)
-		appmetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 	}
 }
 
@@ -240,12 +245,12 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 	logger := slogctx.FromCtx(ctx)
 	pa := pod.Annotations
 	if pa == nil {
-		appmetrics.PodMissingAnnotationsTotal.Inc()
+		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfigRaw, ok := pa[cu.appConfig.BurstAnnotation]
 	if !ok {
-		appmetrics.PodMissingAnnotationsTotal.Inc()
+		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfig, err := parseMultiConfig(burstConfigRaw)
@@ -254,7 +259,7 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 	}
 	logger.Debug("parsed burst annotation", "value", burstConfig)
 	if len(burstConfig) == 0 {
-		appmetrics.PodMissingAnnotationsTotal.Inc()
+		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
 		logger.Warn("burst annotation is empty")
 		return false, nil
 	}
@@ -262,40 +267,44 @@ func (cu *CgroupUpdater) handlePod(ctx context.Context, pod *corev1.Pod) (change
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		containerBurst, ok := burstConfig[containerStatus.Name]
 		if !ok {
-			// TODO try to remove burst from such containers
-			continue
+			containerBurst = "0"
 		}
 		delete(burstConfig, containerStatus.Name)
 		containerLogger := logger.With("container", containerStatus.Name)
 
 		id, err := stripContainerPrefix(containerStatus.ContainerID)
 		if err != nil {
-			return false, err
+			return changed, err
 		}
 
-		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, containerBurst)
+		burstSeconds, _, err := humanize.ParseSI(containerBurst)
 		if err != nil {
-			appmetrics.ContainerUpdateAttemptsFailTotal.Inc()
+			return changed, err
+		}
+
+		containerChanged, err := cu.ContainerdHelper.UpdateContainer(ctx, id, burstSeconds)
+		if err != nil {
+			cu.ownMetrics.ContainerUpdateAttemptsFailTotal.Inc()
 			// error here is not propagated intentionally
 			containerLogger.Error("failed to set burst", "value", containerBurst, "error", err.Error())
 			cu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
 			continue
 		}
 		if containerChanged {
-			appmetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
+			cu.ownMetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
 			changed = true
 			containerLogger.Info("set burst", "value", containerBurst)
 			cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+containerBurst)
 		} else {
-			appmetrics.ContainerUpdateAttemptsSkipTotal.Inc()
+			cu.ownMetrics.ContainerUpdateAttemptsSkipTotal.Inc()
 		}
 		containerLogger.Debug("saving container-to-pod mapping", "id", id)
 		cu.containerToPod[id] = pod
-		appmetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 	}
 	if len(burstConfig) != 0 {
 		logger.Warn("part of annotation is not used", "remaining", burstConfig)
-		appmetrics.PodUnusedAnnotationsTotal.Inc()
+		cu.ownMetrics.PodUnusedAnnotationsTotal.Inc()
 	}
 
 	return

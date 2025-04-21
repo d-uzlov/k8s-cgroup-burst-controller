@@ -12,7 +12,6 @@ import (
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/typeurl/v2"
-	"github.com/dustin/go-humanize"
 	slogctx "github.com/veqryn/slog-context"
 )
 
@@ -21,9 +20,10 @@ type ContainerdHelper struct {
 	containerService containers.Store
 	eventsService    containerd.EventService
 	skipSameSpec     bool
+	ownMetrics       *appmetrics.OwnMetrics
 }
 
-func CreateContainerdHandle(socket string, skipSameSpec bool) (*ContainerdHelper, error) {
+func CreateContainerdHandle(socket string, skipSameSpec bool, ownMetrics *appmetrics.OwnMetrics) (*ContainerdHelper, error) {
 	// all pods created by k8s use k8s.io namespace in containerd
 	client, err := containerd.New(socket, containerd.WithDefaultNamespace("k8s.io"))
 	if err != nil {
@@ -39,6 +39,7 @@ func CreateContainerdHandle(socket string, skipSameSpec bool) (*ContainerdHelper
 		containerService: containerService,
 		eventsService:    eventsService,
 		skipSameSpec:     skipSameSpec,
+		ownMetrics:       ownMetrics,
 	}, nil
 }
 
@@ -60,8 +61,7 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 				}
 				panic("containerd event channel unexpectedly closed")
 			}
-			appmetrics.ContainerdEventsTotal.Inc()
-			// logger.Info("got event from containerd", "event", evt)
+			h.ownMetrics.ContainerdEventsTotal.Inc()
 			event, err := typeurl.UnmarshalAny(evt.Event)
 			if err != nil {
 				panic(err)
@@ -100,14 +100,10 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 	}
 }
 
-func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, containerBurst string) (changed bool, err error) {
+func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burstSeconds float64) (changed bool, err error) {
 	logger := slogctx.FromCtx(ctx)
 
-	burstF, _, err := humanize.ParseSI(containerBurst)
-	if err != nil {
-		return
-	}
-	burstTime := time.Duration(float64(time.Second) * burstF)
+	burstTime := time.Duration(float64(time.Second) * burstSeconds)
 
 	ctr, err := h.client.LoadContainer(ctx, id)
 	if err != nil {

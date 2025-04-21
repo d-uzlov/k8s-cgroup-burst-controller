@@ -6,15 +6,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/metrics"
 	"syscall"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"meoe.io/cgroup-burst/internal/appconfig"
+	"meoe.io/cgroup-burst/internal/appmetrics"
 	"meoe.io/cgroup-burst/internal/k8swatcher"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	slogctx "github.com/veqryn/slog-context"
@@ -28,9 +29,10 @@ func main() {
 
 	logLevel := new(slog.LevelVar)
 	logLevel.Set(slog.LevelInfo)
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	logHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
-	}))
+	})
+	logger := slog.New(logHandler)
 
 	logger = logger.With("host", appConfig.Hostname)
 	ctx = slogctx.NewCtx(ctx, logger)
@@ -53,7 +55,11 @@ func main() {
 		panic(err.Error())
 	}
 
-	cu, err := k8swatcher.CreateCgroupUpdater(ctx, clientset, *appConfig)
+	ownRegistry := prometheus.NewRegistry()
+
+	ownMetrics := appmetrics.NewOwnMetrics(ownRegistry)
+
+	cu, err := k8swatcher.CreateCgroupUpdater(ctx, clientset, *appConfig, ownMetrics)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -64,7 +70,9 @@ func main() {
 		go cu.ContainerdHelper.WatchEvents(ctx, containerUpdates)
 	}
 
-	http.Handle("/metrics", promhttp.Handler())
+	http.Handle("/metrics", promhttp.HandlerFor(ownRegistry, promhttp.HandlerOpts{
+		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
+	}))
 	metricsAddress := ":2112"
 	go func() {
 		logger.Info("started metrics listener", "address", metricsAddress)

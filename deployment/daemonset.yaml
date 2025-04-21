@@ -27,7 +27,10 @@ spec:
         cgroup.meoe.io/node: enable
       containers:
       - name: cgroup-burst
-        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.1.13
+        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.1.17-2
+        ports:
+        - name: metrics
+          containerPort: 2112
         env:
         - name: LOG_LEVEL
           value: debug
@@ -49,10 +52,10 @@ spec:
         resources:
           requests:
             cpu: 1m
-            memory: 10Mi
+            memory: 20Mi
           limits:
             cpu: 5m
-            memory: 20Mi
+            memory: 40Mi
         volumeMounts:
         - name: containerd-socket
           mountPath: /run/containerd/containerd.sock
