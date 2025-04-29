@@ -22,13 +22,16 @@ Track feature request status here:
 Since this is a workaround, it's not guaranteed to work perfectly.
 I did my best to make it work as best as possible but I may have missed something.
 
+Requirements:
+- runc v1.2.0 or newer
+- containerd 2.0 or newer
+- Linux kernel 5.14 or newer
+
 A major issue with the cgroup burst itself is bad support in mainstream linux kernel.
 If you want to fix throttling, you _will_ need to install a custom kernel.
 See details [below](#cgroup-burst-support-in-linux-kernel)
 
-# Usage example
-
-Deploy the app in your cluster:
+# Installation
 
 ```bash
 
@@ -49,6 +52,8 @@ kubectl label node $node cgroup.meoe.io/node=enable
 kubectl -n cgroup-burst get pod -o wide
 
 ```
+
+# Usage example
 
 Enable burst for a specific pod:
 
@@ -130,22 +135,25 @@ See [Cgroup burst support in linux kernel](#cgroup-burst-support-in-linux-kernel
 # Metrics
 
 App provides several types of metrics:
-- Own metrics. Prefixed with `cgroup_burst_`
-- Pod spec metrics. Tries to mimic kube-state-metrics
+- Own metrics. Prefixed with `cgroup_burst_`. Served on `/metrics`
+- Pod spec metrics. Tries to mimic kube-state-metrics. Served on `/container_metrics`
 - - `kube_pod_container_cgroup_burst`
-- Cgroup statistics. Tries to mimic cAdvisor metrics
+- Cgroup statistics. Tries to mimic cAdvisor metrics. Served on `/container_metrics`
 - - `container_cpu_cgroup_burst_periods_total`
 - - `container_cpu_cgroup_burst_seconds_total`
+- Standard Golang metrics. Served on `/default_metrics`
 
 Cgroup statistics are disabled by default.
-They require that the container is running with `securityContext.privileged=true`,
-and you need to mount host `/proc` into container filesystem.
+They will only work with cgroup v2.
 
-This is required to find the cgroup path of the container.
+Cgroup statistics require that the container is running with `securityContext.privileged=true`,
+and you need to mount host `/proc` into container filesystem.
+This is needed to find the cgroup path of the container.
 
 Here is an example of deployment with Cgroup statistics enabled: [daemonset-cgroup-metrics.yaml](./deployment/daemonset-cgroup-metrics.yaml)
 
 TODO it may be possible to get cgroup path from container spec: `spec.linux.cgroupPath`.
+Then you would only need a cgroup read-only mount, instead of both running in privileged mode and having /proc mount.
 But the format is different, and how the format translates to filesystem seems to change over time.
 Example:
 - spec format: `kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice:cri-containerd:34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
