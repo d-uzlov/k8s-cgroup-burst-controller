@@ -28,6 +28,8 @@ spec:
       containers:
       - name: cgroup-burst
         image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.1.46
+        securityContext:
+          readOnlyRootFilesystem: true
         ports:
         - name: metrics
           containerPort: 2112
