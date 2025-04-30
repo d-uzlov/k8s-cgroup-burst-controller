@@ -70,8 +70,8 @@ container_name=
 # you can use SI-compatible suffixes
 burst_time=100ms
 
-kubectl -n $pod_namespace label pod $pod_name cgroup.meoe.io/burst=enable
 kubectl -n $pod_namespace annotate pod $pod_name cgroup.meoe.io/burst=$container_name=$burst_time
+kubectl -n $pod_namespace label pod $pod_name cgroup.meoe.io/burst=enable
 # check pod events for errors and info
 kubectl -n $pod_namespace describe pod $pod_name
 
@@ -79,6 +79,20 @@ kubectl -n $pod_namespace describe pod $pod_name
 
 If more than one container in the pod needs burst, then you can set values for each of them:
 `container-1=10ms,container-2=20ms,container-3=30ms`
+
+For persistent usage add metadata to the pod that you want to enable burst on:
+
+```yaml
+metadata:
+  labels:
+    cgroup.meoe.io/burst: enable
+  annotations:
+    cgroup.meoe.io/burst: nginx=10ms
+```
+
+For deployments, daemonsets, etc., add metadata to pod template.
+
+# How to verify if burst is working
 
 You can check cAdvisor metrics: `rate(container_cpu_cfs_throttled_periods_total)`.
 After applying burst settings the rate should consistently drop.
@@ -103,20 +117,9 @@ cd /sys/fs/cgroup/
 cd kubepods.slice/kubepods-burstable.slice/.../....scope
 cat ./cpu.max
 cat ./cpu.max.burst
+cat ./cpu.stat
 
 ```
-
-For persistent usage add metadata to the pod that you want to enable burst on:
-
-```yaml
-metadata:
-  labels:
-    cgroup.meoe.io/burst: enable
-  annotations:
-    cgroup.meoe.io/burst: nginx=10ms
-```
-
-For deployments, daemonsets, etc., add metadata to pod template.
 
 # Known errors
 
