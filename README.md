@@ -220,65 +220,25 @@ docker build --push . -t ghcr.io/$github_username/$image_name
 
 ```
 
-# Building kernel
+# Install linux kernel on Debian
 
-I used Ubuntu kernel as provided by proxmox: https://git.proxmox.com/?p=pve-kernel.git
-
-You need roughly the following patch: [kernel-burst.patch](./kernel-burst.patch)
-
-You need roughly the following commands to compile the kernel:
+Instructions to build the kernel can be found [here](./kernel-build.md#building-debian-12-kernel-61222-from-backports)
 
 ```bash
 
-sudo apt install bindgen rsync dwarfdump bc libslang2-dev dh-python libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf llvm clang build-essential libncurses-dev bison flex libssl-dev libelf-dev dh-sequence-sphinxdoc python3 devscripts fakeroot dwarves
+mkdir linux-6.12.22-burstunlock0
+cd linux-6.12.22-burstunlock0
+wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-debian-6.12/6.12.22-burstunlock0.zip
+unzip 6.12.22-burstunlock0.zip
 
-fakeroot debian/rules clean
-make ARCH=x86 mrproper
+sudo apt install libdw1 pahole
 
-# at this point apply the patch
+sudo dpkg -i *-burstunlock0-*.deb
 
-# at this point create .config file
-# either copy it from somewhere or create via `fakeroot debian/rules editconfigs`
-
-fakeroot debian/rules binary-headers binary-generic binary-perarch > ./build.log
-
-```
-
-Reference for instructions:
-- https://askubuntu.com/questions/1528871/error-re-compiling-ubuntu-jammy-hwe-kernel-6-8-0-45
-- https://irclogs.ubuntu.com/2019/12/16/%23ubuntu-kernel.txt
-- https://wiki.ubuntu.com/Kernel/BuildYourOwnKernel
-
-# Install linux kernel
-
-Kernel published here is built roughly using instructions from the previous section: [Building kernel](#building-kernel)
-
-TODO: create proper packages with custom kernel
-
-```bash
-
-mkdir linux-ubuntu-6.8.0-58-cgroup-burst-patch
-cd linux-ubuntu-6.8.0-58-cgroup-burst-patch
-wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-6.8.0-58/linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
-unzip linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
-
-sudo dpkg -i linux-bpf-dev_6.8.0-58.60_amd64.deb
-sudo dpkg -i linux-buildinfo-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-# sudo dpkg -i linux-cloud-tools-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-sudo dpkg -i linux-headers-6.8.0-58_6.8.0-58.60_all.deb
-# sudo apt install libc6 libelf1t64 libssl3t64
-# sudo dpkg -i linux-headers-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-sudo dpkg -i linux-lib-rust-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-sudo dpkg -i linux-modules-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-sudo dpkg -i linux-image-unsigned-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-sudo apt install wireless-regdb
-sudo dpkg -i linux-modules-extra-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-ipu6-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-iwlwifi-6.8.0-58-generic_6.8.0-58.60_amd64.deb linux-modules-usbio-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-# sudo dpkg -i linux-tools-6.8.0-58-generic_6.8.0-58.60_amd64.deb
-
-rm linux-ubuntu-6.8.0-58-cgroup-burst-patch.zip
+rm 6.12.22-burstunlock0.zip
 
 # if you want to remove this kernel
-sudo dpkg -l | grep linux | grep 6.8.0-58
-sudo dpkg -P linux-image-unsigned-6.8.0-58-generic linux-modules-6.8.0-58-generic
+sudo dpkg --list | grep 6.12.22-burstunlock0
+sudo dpkg --list | grep 6.12.22-burstunlock0 | awk '{ print $2 }' | xargs sudo dpkg -P
 
 ```

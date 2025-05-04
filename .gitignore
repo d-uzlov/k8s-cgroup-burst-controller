@@ -2,3 +2,5 @@
 /cgroup-burst
 
 *.log
+
+env/
