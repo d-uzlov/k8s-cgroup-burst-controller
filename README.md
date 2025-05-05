@@ -132,8 +132,8 @@ write /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-
 invalid argument\n: unknown
 ```
 
-You need to install a [custom linux kernel](#install-linux-kernel) to solve this.
-See [Cgroup burst support in linux kernel](#cgroup-burst-support-in-linux-kernel) for details of what is causing this.
+You need to install a [custom linux kernel](#install-patched-linux-kernel-on-debian) to solve this.
+See [Cgroup burst support in linux kernel](#cgroup-burst-support-in-linux-kernel) for reasoning.
 
 # Metrics
 
@@ -190,7 +190,7 @@ Seriously though, limit `burst <= quota` effectively allows you to just double C
 
 So, while you can use this application on mainstream kernels, it's not very useful.
 
-To make better use of this feature, you need to use a [custom Linux kernel](#install-linux-kernel) which was patched to disable this limit.
+To make better use of this feature, you need to use a [custom Linux kernel](#install-patched-linux-kernel-on-debian) which was patched to disable this limit.
 
 P.S. In various old articles about burst in cgroup v1 I see a reference to `sched_cfs_bw_burst_enabled` kernel parameter,
 that is supposedly needed to bypass the `burst <= quota` limit.
@@ -220,25 +220,29 @@ docker build --push . -t ghcr.io/$github_username/$image_name
 
 ```
 
-# Install linux kernel on Debian
+# Install patched linux kernel on Debian
+
+This is a kernel with a patch to unlock unlimited values for CPU burst feature.
 
 Instructions to build the kernel can be found [here](./kernel-build.md#building-debian-12-kernel-61222-from-backports)
 
 ```bash
+
+# check if this kernel is already installed
+sudo dpkg --list | grep 6.12.22-burstunlock
 
 mkdir linux-6.12.22-burstunlock0
 cd linux-6.12.22-burstunlock0
 wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-debian-6.12/6.12.22-burstunlock0.zip
 unzip 6.12.22-burstunlock0.zip
 
-sudo apt install libdw1 pahole
+sudo apt install -y libdw1 pahole gcc-12 binutils
 
 sudo dpkg -i *-burstunlock0-*.deb
 
 rm 6.12.22-burstunlock0.zip
 
 # if you want to remove this kernel
-sudo dpkg --list | grep 6.12.22-burstunlock0
 sudo dpkg --list | grep 6.12.22-burstunlock0 | awk '{ print $2 }' | xargs sudo dpkg -P
 
 ```
