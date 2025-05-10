@@ -187,9 +187,7 @@ func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName st
 	return nil
 }
 
-type CgroupBurstReader func() (nrBurst, burstSeconds float64, err error)
-
-func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) (CgroupBurstReader, error) {
+func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) (appmetrics.CgroupUpdaterFunction, error) {
 	if mode := cgroups.Mode(); mode != cgroups.Unified {
 		return nil, fmt.Errorf("unknown cgroup mode: %v", mode)
 	}

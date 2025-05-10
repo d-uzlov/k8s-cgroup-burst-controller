@@ -111,6 +111,9 @@ func main() {
 	ownMetrics := appmetrics.NewOwnMetrics(ownRegistry)
 	containerMetrics := appmetrics.NewContainerMetrics(containerRegistry)
 
+	go containerMetrics.RunOperations()
+	defer containerMetrics.CloseRequestChan()
+
 	cu, err := k8swatcher.CreateCgroupUpdater(ctx, clientset, *appConfig, ownMetrics, containerMetrics)
 	if err != nil {
 		panic(err.Error())
@@ -134,7 +137,7 @@ func main() {
 	})
 	if appConfig.EnableCgroupMetrics {
 		logger.Info("adding cgroup gathering before /container_metrics endpoint")
-		containerMetricsHandler = appmetrics.NewInterceptHandler(ctx, containerMetricsHandler, cu.GatherCgroupBurst, appConfig.CgroupUpdateDelay, appConfig.CgroupMetricsTimeout)
+		containerMetricsHandler = appmetrics.NewInterceptHandler(ctx, containerMetricsHandler, containerMetrics.RunUpdates, appConfig.CgroupUpdateDelay, appConfig.CgroupMetricsTimeout)
 	}
 	appmetrics.SetupMetricListener(ctx, appConfig.MetricsAddress, ownMetricsHandler, containerMetricsHandler, logHandler)
 

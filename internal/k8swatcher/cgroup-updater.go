@@ -3,7 +3,6 @@ package k8swatcher
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,16 +37,9 @@ type CgroupUpdater struct {
 	ContainerdHelper    *containerdhelper.ContainerdHelper
 	er                  record.EventRecorder
 	lastResourceVersion string
-	containerToPod      map[string]*podCacheEntry
+	containerToPod      map[string]*corev1.Pod
 	ownMetrics          *appmetrics.OwnMetrics
 	containerMetrics    *appmetrics.ContainerMetrics
-}
-
-type podCacheEntry struct {
-	pod    *corev1.Pod
-	reader containerdhelper.CgroupBurstReader
-	labels prometheus.Labels
-	logger *slog.Logger
 }
 
 func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
@@ -70,7 +62,7 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 		ContainerdHelper:    ch,
 		er:                  er,
 		lastResourceVersion: "0",
-		containerToPod:      map[string]*podCacheEntry{},
+		containerToPod:      map[string]*corev1.Pod{},
 		ownMetrics:          ownMetrics,
 		containerMetrics:    containerMetrics,
 	}, nil
@@ -105,6 +97,11 @@ func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Inter
 		}
 		// lastResourceVersion has expired
 		cu.lastResourceVersion = "0"
+		// purge all caches to avoid missing updates
+		cu.containerToPod = map[string]*corev1.Pod{}
+		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+			Operation: appmetrics.CachePurge,
+		}
 		return cu.createWatcher(ctx)
 	}
 	return
@@ -138,11 +135,10 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			if !ok {
 				return fmt.Errorf("containerd updates channel is closed")
 			}
-			podEntry, ok := cu.containerToPod[id]
+			pod, ok := cu.containerToPod[id]
 			if !ok {
 				continue
 			}
-			pod := podEntry.pod
 
 			callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
 
@@ -237,12 +233,10 @@ func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 	}
 }
 func (cu *CgroupUpdater) deleteFromCache(id string) {
-	cacheEntry, ok := cu.containerToPod[id]
-	if !ok {
-		return
+	cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+		Operation: appmetrics.CacheRemove,
+		Id:        id,
 	}
-	cu.containerMetrics.CgroupBurstNr.Delete(cacheEntry.labels)
-	cu.containerMetrics.CgroupBurstSeconds.Delete(cacheEntry.labels)
 	delete(cu.containerToPod, id)
 	cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 }
@@ -345,49 +339,30 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 		return
 	}
 	logger.Debug("saving container-to-pod mapping", "id", id)
+
+	cu.containerToPod[id] = pod
+	cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+
 	gatherMetrics, err := cu.ContainerdHelper.GetCgroupBurstReader(ctx, id)
 	if err != nil {
 		logger.Error("could not get cgroup reader")
-		gatherMetrics = nil
-	}
-	cacheEntry, ok := cu.containerToPod[id]
-	if !ok {
-		cacheEntry = &podCacheEntry{
-			reader: gatherMetrics,
-			labels: prometheus.Labels{
-				"node":      cu.appConfig.NodeName,
-				"namespace": pod.Namespace,
-				"pod":       pod.Name,
-				"container": containerStatus.Name,
-				"name":      id,
-			},
-			logger: logger,
+		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+			Operation: appmetrics.CacheRemove,
+			Id:        id,
 		}
-		cu.containerToPod[id] = cacheEntry
-		cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
+		return
 	}
-	cacheEntry.pod = pod
+	cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+		Operation: appmetrics.CacheAdd,
+		Id:        id,
+		Labels:    prometheus.Labels{
+			"node":      cu.appConfig.NodeName,
+			"namespace": pod.Namespace,
+			"pod":       pod.Name,
+			"container": containerStatus.Name,
+			"name":      id,
+		},
+		Update:    gatherMetrics,
+	}
 	return
-}
-
-func (cu *CgroupUpdater) GatherCgroupBurst(ctx context.Context) error {
-	for k, v := range cu.containerToPod {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if v.reader == nil {
-			continue
-		}
-		nrBurst, burstSeconds, err := v.reader()
-		if err != nil {
-			v.logger.Error("could not read cgroup metrics", "error", err.Error())
-			cu.containerMetrics.CgroupBurstNr.Delete(v.labels)
-			cu.containerMetrics.CgroupBurstSeconds.Delete(v.labels)
-			delete(cu.containerToPod, k)
-			continue
-		}
-		cu.containerMetrics.CgroupBurstNr.With(v.labels).Set(nrBurst)
-		cu.containerMetrics.CgroupBurstSeconds.With(v.labels).Set(burstSeconds)
-	}
-	return nil
 }
