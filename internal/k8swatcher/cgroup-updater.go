@@ -380,6 +380,7 @@ func (cu *CgroupUpdater) GatherCgroupBurst() {
 			v.logger.Error("could not read cgroup metrics", "error", err.Error())
 			cu.containerMetrics.CgroupBurstNr.Delete(v.labels)
 			cu.containerMetrics.CgroupBurstSeconds.Delete(v.labels)
+			delete(cu.containerToPod, k)
 			continue
 		}
 		cu.containerMetrics.CgroupBurstNr.With(v.labels).Set(nrBurst)
