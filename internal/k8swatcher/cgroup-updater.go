@@ -370,8 +370,11 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 	return
 }
 
-func (cu *CgroupUpdater) GatherCgroupBurst() {
-	for _, v := range cu.containerToPod {
+func (cu *CgroupUpdater) GatherCgroupBurst(ctx context.Context) error {
+	for k, v := range cu.containerToPod {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if v.reader == nil {
 			continue
 		}
@@ -386,4 +389,5 @@ func (cu *CgroupUpdater) GatherCgroupBurst() {
 		cu.containerMetrics.CgroupBurstNr.With(v.labels).Set(nrBurst)
 		cu.containerMetrics.CgroupBurstSeconds.With(v.labels).Set(burstSeconds)
 	}
+	return nil
 }

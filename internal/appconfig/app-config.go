@@ -25,6 +25,8 @@ type AppConfig struct {
 	EnableCgroupMetrics  bool
 	CgroupRoot           string
 	ProcRoot             string
+	CgroupUpdateDelay    time.Duration
+	CgroupMetricsTimeout time.Duration
 }
 
 func ParseConfig() *AppConfig {
@@ -50,6 +52,8 @@ func ParseConfig() *AppConfig {
 			"Requires container.securityContext.privileged=true. WIthout privileged mode container is running in its own cgroup namespace and can't find cgroup path of other processes")
 	flag.StringVar(&result.CgroupRoot, "cgroup-root", "/sys/fs/cgroup", "Path to the root of the cgroup mount. Usually don't need to be changed")
 	flag.StringVar(&result.ProcRoot, "proc-root", "/proc", "Path to the root of the /proc mount. When running in a container this should point to /proc mounted from host")
+	flag.DurationVar(&result.CgroupUpdateDelay, "cgroup-update-delay", time.Second*10, "Cgroup metrics can be outdated, this parameter limits time between gathering cgroup metrics")
+	flag.DurationVar(&result.CgroupMetricsTimeout, "cgroup-metrics-timeout", time.Second, "Timeout for updating cgroup metrics")
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,7 +41,12 @@ func setStartupBurst(ctx context.Context, appConfig *appconfig.AppConfig) {
 	}
 	defer ch.Close()
 
-	startupBurstSeconds := 1.0
+	// Usually when we change burst on container, we emit k8s event for this
+	// but here we bypass k8s connection, and can't create events.
+	// If burst annotation on the pod matches startup burst duration, we will skip emitting event for the initial change.
+	// By doing '+ 1e-4' I try to set a value that will never be encountered in the burst annotation
+	// so whatever burst is requested by annotation, an event is emitted.
+	startupBurstSeconds := 1.0 + 1e-4
 	err = ch.UpdateContainerByName(ctx, appConfig.PodName, appConfig.PodNamespace, startupBurstSeconds)
 	if err != nil {
 		panic(err)
@@ -122,31 +126,17 @@ func main() {
 		go cu.ContainerdHelper.WatchEvents(ctx, containerUpdates)
 	}
 
-	logger.Info("add default metrics handler", "address", appConfig.MetricsAddress, "path", "/default_metrics")
-	http.Handle("/default_metrics", promhttp.Handler())
-	logger.Info("add own metrics handler", "address", appConfig.MetricsAddress, "path", "/metrics")
-	http.Handle("/metrics", promhttp.HandlerFor(ownRegistry, promhttp.HandlerOpts{
-		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
-	}))
-	logger.Info("add container metrics handler", "address", appConfig.MetricsAddress, "path", "/container_metrics")
-	prometheusHandler := promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
+	ownMetricsHandler := promhttp.HandlerFor(ownRegistry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 	})
-	containerMetricsHandler := prometheusHandler
+	containerMetricsHandler := promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
+		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
+	})
 	if appConfig.EnableCgroupMetrics {
 		logger.Info("adding cgroup gathering before /container_metrics endpoint")
-		containerMetricsHandler = NewInterceptHandler(prometheusHandler, cu.GatherCgroupBurst)
+		containerMetricsHandler = appmetrics.NewInterceptHandler(ctx, containerMetricsHandler, cu.GatherCgroupBurst, appConfig.CgroupUpdateDelay, appConfig.CgroupMetricsTimeout)
 	}
-	http.Handle("/container_metrics", containerMetricsHandler)
-	go func() {
-		err := http.ListenAndServe(appConfig.MetricsAddress, nil)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			panic(err.Error())
-		}
-	}()
+	appmetrics.SetupMetricListener(ctx, appConfig.MetricsAddress, ownMetricsHandler, containerMetricsHandler, logHandler)
 
 	err = cu.Watch(ctx, containerUpdates)
 	if ctx.Err() != nil {
@@ -156,21 +146,4 @@ func main() {
 	if err != nil {
 		panic(err.Error())
 	}
-}
-
-type InterceptHandler struct {
-	handler http.Handler
-	update  func()
-}
-
-func NewInterceptHandler(handler http.Handler, update func()) *InterceptHandler {
-	return &InterceptHandler{
-		handler: handler,
-		update:  update,
-	}
-}
-
-func (h InterceptHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.update()
-	h.handler.ServeHTTP(w, r)
 }
