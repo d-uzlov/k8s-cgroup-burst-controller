@@ -3,11 +3,14 @@ package containerdhelper
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"k8s.io/utils/ptr"
 	"meoe.io/cgroup-burst/internal/appmetrics"
 
+	"github.com/containerd/cgroups"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/containers"
@@ -112,8 +115,6 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burstSeconds float64) (changed bool, err error) {
 	logger := slogctx.FromCtx(ctx)
 
-	burstTime := time.Duration(float64(time.Second) * burstSeconds)
-
 	ctr, err := h.client.LoadContainer(ctx, id)
 	if err != nil {
 		return
@@ -127,7 +128,7 @@ func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burst
 		return
 	}
 
-	burstMks := uint64(burstTime.Microseconds())
+	burstMks := uint64(time.Duration(float64(time.Second) * burstSeconds).Microseconds())
 	if h.skipSameSpec && spec.Linux.Resources.CPU.Burst != nil && *spec.Linux.Resources.CPU.Burst == burstMks {
 		logger.Debug("skipping container update: old spec value matches new one")
 		return
@@ -189,6 +190,10 @@ func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName st
 type CgroupBurstReader func() (nrBurst, burstSeconds float64, err error)
 
 func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) (CgroupBurstReader, error) {
+	if mode := cgroups.Mode(); mode != cgroups.Unified {
+		return nil, fmt.Errorf("unknown cgroup mode: %v", mode)
+	}
+
 	ctr, err := h.client.LoadContainer(ctx, id)
 	if err != nil {
 		return nil, err
@@ -201,8 +206,22 @@ func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) 
 
 	slogctx.FromCtx(ctx).Debug("creating cgroup reader", "container-id", id, "pid", pid)
 
+	cgroupBytes, err := os.ReadFile(fmt.Sprintf("%v/%v/cgroup", h.procRoot, pid))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get cgroup path")
+	}
+	text := string(cgroupBytes)
+	parts := strings.SplitN(text, ":", 3)
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	}
+	if parts[0] != "0" || parts[1] != "" {
+		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	}
+	path := strings.TrimSuffix(parts[2], "\n")
+
 	result := func() (nrBurst float64, burstSeconds float64, err error) {
-		return GetCPUMetrics(h.cgroupRoot, h.procRoot, pid)
+		return GetCPUMetrics(h.cgroupRoot+path, h.procRoot, pid)
 	}
 	return result, nil
 }

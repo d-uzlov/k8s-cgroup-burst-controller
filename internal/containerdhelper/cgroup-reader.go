@@ -8,32 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/cgroups"
 	"github.com/pkg/errors"
 )
 
-func GetCPUMetrics(cgroupRoot string, procRoot string, pid int) (nrBurst, burstSeconds float64, err error) {
-	if mode := cgroups.Mode(); mode != cgroups.Unified {
-		return 0, 0, fmt.Errorf("unknown cgroup mode: %v", mode)
-	}
-	cgroupBytes, err := os.ReadFile(fmt.Sprintf("%v/%v/cgroup", procRoot, pid))
-	if err != nil {
-		return 0, 0, errors.Wrap(err, "failed to get cgroup2 path")
-	}
-	text := string(cgroupBytes)
-	parts := strings.SplitN(text, ":", 3)
-	if len(parts) < 3 {
-		return 0, 0, fmt.Errorf("invalid cgroup entry: %q", text)
-	}
-	if parts[0] != "0" || parts[1] != "" {
-		return 0, 0, fmt.Errorf("invalid cgroup entry: %q", text)
-	}
-	path := strings.TrimSuffix(parts[2], "\n")
-
-	fullPath := cgroupRoot + path + "/cpu.stat"
+func GetCPUMetrics(cgroupFolder string, procRoot string, pid int) (nrBurst, burstSeconds float64, err error) {
 	// we need to parse the file manually because currently
-	// cgroup package does not support reporting on burst stats
-	stats, err := readKVStatsFile(fullPath)
+	// cgroup package from containerd does not support reporting on burst stats
+	stats, err := readKVStatsFile(cgroupFolder + "/cpu.stat")
 	if err != nil {
 		return 0, 0, err
 	}
