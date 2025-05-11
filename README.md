@@ -11,6 +11,7 @@ and it sets cpu burst for each container in the namespace as a percentage relati
 This application requires separate settings per pod,
 defines burst in seconds,
 and allows you to define different absolute burst value for each container.
+It is tested with cgroup v2, but should theoretically also work with cgroup v1.
 
 # Read before use
 
@@ -146,7 +147,7 @@ App provides several types of metrics:
 - - `container_cpu_cgroup_burst_seconds_total`
 - Standard Golang metrics. Served on `/default_metrics`
 
-Cgroup statistics require access to host cgroup info.
+Cgroup statistics require access to host cgroup info, and work only with cgroup v2.
 Safer way to find it is to decode cgroup info from container spec. Example deployment is configured to use this method.
 However, the format seems to be unstable, so it can theoretically break with updates.
 
