@@ -316,6 +316,12 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 			logger.Error("could not parse annotation", "burst-string", burstString, "error", err.Error())
 			return false
 		}
+	} else {
+		// It's ok when burstConfig does not have value for matching container.
+		// In this case we just update the spec with zero burst.
+		// This is required in case container had burst spec previously but later it was removed.
+		// Map already returns empty value but missing keys, but let's set this explicitly.
+		burstString = ""
 	}
 
 	id, err := stripContainerPrefix(containerStatus.ContainerID)

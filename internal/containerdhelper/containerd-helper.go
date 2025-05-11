@@ -114,7 +114,7 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 
 func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burstSeconds float64) (changed bool, err error) {
 	burstUs := uint64(time.Duration(float64(time.Second) * burstSeconds).Microseconds())
-	logger := slogctx.FromCtx(ctx).With("container-id", id, "burst-us", burstUs)
+	logger := slogctx.FromCtx(ctx).With("burst-us", burstUs)
 
 	ctr, err := h.client.LoadContainer(ctx, id)
 	if err != nil {
