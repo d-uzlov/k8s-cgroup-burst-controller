@@ -15,13 +15,13 @@ It is tested with cgroup v2, but should theoretically also work with cgroup v1.
 
 # Read before use
 
-This is a workaround for a missing feature in k8s 1.32.
+This is a workaround for a missing feature in k8s 1.33.
 Future versions of k8s may include support for CPU burst, making this app obsolete.
 Track feature request status here:
 [Use Linux CFS burst to get rid of unnecessary CPU throttling](https://github.com/kubernetes/kubernetes/issues/104516)
 
 Since this is a workaround, it's not guaranteed to work perfectly.
-I did my best to make it work as best as possible but I may have missed something.
+I tried to make it work as best as possible but I may have missed something.
 
 Requirements:
 - runc v1.2.0 or newer
@@ -29,7 +29,7 @@ Requirements:
 - Linux kernel 5.14 or newer
 
 A major issue with the cgroup burst itself is bad support in mainstream linux kernel.
-If you want to fix throttling, you _will_ need to install a custom kernel.
+If you want to fix throttling in lightweights apps with low CPU limit, you will certainly need to install a custom kernel.
 See details [below](#cgroup-burst-support-in-linux-kernel)
 
 # Installation
@@ -162,13 +162,13 @@ https://github.com/torvalds/linux/commit/f4183717b370ad28dd0c0d74760142b20e6e793
 However, it artificially limits max burst amount to quota size:
 https://github.com/torvalds/linux/blob/f4183717b370ad28dd0c0d74760142b20e6e7931/kernel/sched/core.c#L9814
 
-And this limit is still present in the 6.15:
-https://github.com/torvalds/linux/blob/v6.15-rc2/kernel/sched/core.c#L9477
+And this limit is still present in Linux v6.15:
+https://github.com/torvalds/linux/blob/v6.15-rc5/kernel/sched/core.c#L9477
 
 This is very stupid, because quota and burst are measured in different units:
 quota is in seconds per scheduling period, and the burst is in absolute seconds.
 If you set quota to 0.5 cores, and the period is 100 ms (default value in k8s),
-then burst is limited to 50 ms, and if the period is 10 ms, then burst is limited to 5 ms.
+then burst is limited to 50 ms, but if the period is 10 ms, then burst is suddenly limited to 5 ms.
 The limit is absolutely artificial, and does not make sense to me in any way.
 
 But more importantly, if your application sleeps most of the time, and the average CPU usage is `1m`,
