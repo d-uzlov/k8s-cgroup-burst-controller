@@ -113,7 +113,8 @@ func (h *ContainerdHelper) WatchEvents(ctx context.Context, containerUpdates cha
 }
 
 func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burstSeconds float64) (changed bool, err error) {
-	logger := slogctx.FromCtx(ctx)
+	burstUs := uint64(time.Duration(float64(time.Second) * burstSeconds).Microseconds())
+	logger := slogctx.FromCtx(ctx).With("container-id", id, "burst-us", burstUs)
 
 	ctr, err := h.client.LoadContainer(ctx, id)
 	if err != nil {
@@ -128,12 +129,11 @@ func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burst
 		return
 	}
 
-	burstMks := uint64(time.Duration(float64(time.Second) * burstSeconds).Microseconds())
-	if h.skipSameSpec && spec.Linux.Resources.CPU.Burst != nil && *spec.Linux.Resources.CPU.Burst == burstMks {
+	if h.skipSameSpec && spec.Linux.Resources.CPU.Burst != nil && *spec.Linux.Resources.CPU.Burst == burstUs {
 		logger.Debug("skipping container update: old spec value matches new one")
 		return
 	}
-	spec.Linux.Resources.CPU.Burst = ptr.To(burstMks)
+	spec.Linux.Resources.CPU.Burst = ptr.To(burstUs)
 
 	err = task.Update(ctx, containerd.WithResources(spec.Linux.Resources))
 	if err != nil {
@@ -160,7 +160,10 @@ func (h *ContainerdHelper) UpdateContainer(ctx context.Context, id string, burst
 }
 
 func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName string, podNamespace string, burstSeconds float64) (err error) {
-	logger := slogctx.FromCtx(ctx).With("source", "UpdateContainerByName", "pod", podName, "namespace", podNamespace)
+	ctx = slogctx.With(ctx, "source", "UpdateContainerByName", "pod", podName, "namespace", podNamespace, "burst-seconds", burstSeconds)
+	logger := slogctx.FromCtx(ctx)
+
+	logger.Info("updating all containers with name filter")
 
 	filter := fmt.Sprintf(
 		`labels."io.kubernetes.pod.name"=="%s",labels."io.kubernetes.pod.namespace"=="%s"`,

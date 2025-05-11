@@ -29,8 +29,7 @@ type OwnMetrics struct {
 	PodUpdatesK8sFailTotal           prometheus.Counter
 	PodUpdatesK8sSkipTotal           prometheus.Counter
 	PodUpdatesContainerdSuccessTotal prometheus.Counter
-	// this one does not exist because the app panics on such events
-	// PodUpdatesContainerdFailTotal prometheus.Counter
+	PodUpdatesContainerdFailTotal prometheus.Counter
 	PodUpdatesContainerdSkipTotal prometheus.Counter
 	PodUnusedAnnotationsTotal     prometheus.Counter
 	PodMissingAnnotationsTotal    prometheus.Counter
@@ -136,6 +135,16 @@ func NewOwnMetrics(registry *prometheus.Registry) *OwnMetrics {
 				"from": "containerd",
 			},
 		}),
+		PodUpdatesContainerdFailTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: prometheusNamespace,
+			Subsystem: "pod",
+			Name:      "updates_total",
+			Help:      podUpdateDescription,
+			ConstLabels: prometheus.Labels{
+				"type": "fail",
+				"from": "containerd",
+			},
+		}),
 		PodUpdatesContainerdSkipTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: prometheusNamespace,
 			Subsystem: "pod",
@@ -206,6 +215,7 @@ func NewOwnMetrics(registry *prometheus.Registry) *OwnMetrics {
 	registry.MustRegister(result.PodUpdatesK8sFailTotal)
 	registry.MustRegister(result.PodUpdatesK8sSkipTotal)
 	registry.MustRegister(result.PodUpdatesContainerdSuccessTotal)
+	registry.MustRegister(result.PodUpdatesContainerdFailTotal)
 	registry.MustRegister(result.PodUpdatesContainerdSkipTotal)
 	registry.MustRegister(result.PodUnusedAnnotationsTotal)
 	registry.MustRegister(result.PodMissingAnnotationsTotal)

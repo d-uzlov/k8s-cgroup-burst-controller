@@ -43,11 +43,12 @@ func readKVStatsFile(path string) (map[string]int64, error) {
 	return result, s.Err()
 }
 
-func parseKV(raw string) (string, int64, error) {
+func parseKV(raw string) (key string, value int64, err error) {
 	parts := strings.Fields(raw)
 	if len(parts) != 2 {
-		return "", 0, errors.New("invalid format")
+		return "", 0, errors.New("invalid format: expected 'key value'")
 	}
-	value, err := strconv.ParseInt(parts[1], 10, 64)
-	return parts[0], value, err
+	key = parts[0]
+	value, err = strconv.ParseInt(parts[1], 10, 64)
+	return
 }

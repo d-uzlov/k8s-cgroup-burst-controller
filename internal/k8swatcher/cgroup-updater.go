@@ -125,7 +125,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 				if err != nil {
 					return err
 				}
-				continue
+				break
 			}
 			err = cu.handlePodEvent(ctx, podEvent)
 			if err != nil {
@@ -137,19 +137,20 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			}
 			pod, ok := cu.containerToPod[id]
 			if !ok {
-				continue
+				break
 			}
 
 			callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
 
-			// the program should receive events of its own updates
+			// the program could receive events of its own updates
 			// this is fine, because on the second iteration
 			// the program will see that there are no changes in burst spec and skip the update
 
 			// we call the full updatePod method because in case we need to emit events, we need full pod context
 			changed, err := cu.UpdatePod(callCtx, pod)
 			if err != nil {
-				panic("previously this pod worked fine but we got an error when updating it on event: pod " + pod.Name + ": " + err.Error())
+				cu.ownMetrics.PodUpdatesContainerdFailTotal.Inc()
+				break
 			}
 			if changed {
 				cu.ownMetrics.PodUpdatesContainerdSuccessTotal.Inc()
@@ -166,7 +167,7 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 	case watch.Bookmark:
 		pod, ok := event.Object.(*corev1.Pod)
 		if !ok {
-			return fmt.Errorf("unexpected error %T", event.Object)
+			return fmt.Errorf("could not parse pod bookmark: %T", event.Object)
 		}
 		cu.ownMetrics.K8sWatchBookmarksTotal.Inc()
 		cu.lastResourceVersion = pod.ResourceVersion
@@ -254,12 +255,13 @@ func parseMultiConfig(config string) (map[string]string, error) {
 	return result, nil
 }
 
-func stripContainerPrefix(fullId string) (id string, err error) {
-	if !strings.HasPrefix(fullId, "containerd://") {
+func stripContainerPrefix(fullId string) (string, error) {
+	const containerdPrefix = "containerd://"
+	if !strings.HasPrefix(fullId, containerdPrefix) {
 		return "", fmt.Errorf("unexpected container ID prefix: %v", fullId)
 	}
-	id = strings.TrimPrefix(fullId, "containerd://")
-	return
+	id := strings.TrimPrefix(fullId, containerdPrefix)
+	return id, nil
 }
 
 func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (changed bool, err error) {
@@ -278,13 +280,12 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 	if err != nil {
 		return false, errors.Wrapf(err, "could not parse burst annotation")
 	}
-	logger.Debug("parsed burst annotation", "value", burstConfig)
 	if len(burstConfig) == 0 {
 		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
 		logger.Warn("burst annotation is empty")
 		return false, nil
 	}
-	logger.Debug("found matching pod")
+	logger.Info("found matching pod", "burst-annotation", burstConfig)
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		containerChanged := cu.updateContainer(ctx, pod, containerStatus, burstConfig)
 		changed = changed || containerChanged
@@ -298,7 +299,9 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 }
 
 func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, containerStatus corev1.ContainerStatus, burstConfig map[string]string) (changed bool) {
-	logger := slogctx.FromCtx(ctx).With("container", containerStatus.Name)
+	ctx = slogctx.With(ctx, "container", containerStatus.Name)
+	logger := slogctx.FromCtx(ctx)
+
 	var err error
 	burstSeconds := 0.0
 	burstString, ok := burstConfig[containerStatus.Name]
@@ -306,16 +309,19 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 		delete(burstConfig, containerStatus.Name)
 		burstSeconds, _, err = humanize.ParseSI(burstString)
 		if err != nil {
-			logger.Error("could not parse annotation", "value", burstString, "error", err.Error())
+			logger.Error("could not parse annotation", "burst-string", burstString, "error", err.Error())
 			return false
 		}
 	}
 
 	id, err := stripContainerPrefix(containerStatus.ContainerID)
 	if err != nil {
-		logger.Error("could not parse container ID", "value", containerStatus.ContainerID, "error", err.Error())
+		logger.Error("could not parse container ID", "raw-container-id", containerStatus.ContainerID, "error", err.Error())
 		return false
 	}
+
+	ctx = slogctx.With(ctx, "container-id", id, "burst-string", burstString)
+	logger = slogctx.FromCtx(ctx)
 
 	cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
 
@@ -323,13 +329,13 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 	if err != nil {
 		cu.ownMetrics.ContainerUpdateAttemptsFailTotal.Inc()
 		// error here is not propagated intentionally
-		logger.Error("failed to set burst", "value", burstString, "error", err.Error())
+		logger.Error("failed to set burst", "error", err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventContainerError, containerStatus.Name+": unable to set cpu burst: "+err.Error())
 		return
 	}
 	if changed {
 		cu.ownMetrics.ContainerUpdateAttemptsSuccessTotal.Inc()
-		logger.Info("set burst", "value", burstString)
+		logger.Info("set burst successfully")
 		cu.er.Event(pod, corev1.EventTypeNormal, eventContainerSet, containerStatus.Name+": set cpu burst to "+burstString)
 	} else {
 		cu.ownMetrics.ContainerUpdateAttemptsSkipTotal.Inc()
@@ -338,14 +344,13 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 		cu.deleteFromCache(id)
 		return
 	}
-	logger.Debug("saving container-to-pod mapping", "id", id)
 
 	cu.containerToPod[id] = pod
 	cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 
 	gatherMetrics, err := cu.ContainerdHelper.GetCgroupBurstReader(ctx, id)
 	if err != nil {
-		logger.Error("could not get cgroup reader")
+		logger.Error("could not create cgroup reader")
 		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
 			Operation: appmetrics.CacheRemove,
 			Id:        id,
