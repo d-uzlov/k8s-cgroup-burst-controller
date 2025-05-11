@@ -76,10 +76,14 @@ func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Inter
 	logger := slogctx.FromCtx(ctx)
 
 	cu.ownMetrics.K8sWatchStreamsTotal.Inc()
+	sendInitialEvents := false
+	if cu.lastResourceVersion == "0" {
+		sendInitialEvents = true
+	}
 	logger.Info("starting new watch", "from-version", cu.lastResourceVersion)
 	watcher, err = cu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 		Watch:                true,
-		SendInitialEvents:    ptr.To(true),
+		SendInitialEvents:    &sendInitialEvents,
 		AllowWatchBookmarks:  true,
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 		ResourceVersion:      cu.lastResourceVersion,
