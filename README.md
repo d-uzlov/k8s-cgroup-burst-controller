@@ -146,23 +146,12 @@ App provides several types of metrics:
 - - `container_cpu_cgroup_burst_seconds_total`
 - Standard Golang metrics. Served on `/default_metrics`
 
-Cgroup statistics are disabled by default.
-They will only work with cgroup v2.
+Cgroup statistics require access to host cgroup info.
+Safer way to find it is to decode cgroup info from container spec. Example deployment is configured to use this method.
+However, the format seems to be unstable, so it can theoretically break with updates.
 
-Cgroup statistics require that the container is running with `securityContext.privileged=true`,
-and you need to mount host `/proc` into container filesystem.
-This is needed to find the cgroup path of the container.
-
-Here is an example of deployment with Cgroup statistics enabled: [daemonset-cgroup-metrics.yaml](./deployment/daemonset-cgroup-metrics.yaml)
-
-TODO it may be possible to get cgroup path from container spec: `spec.linux.cgroupPath`.
-Then you would only need a cgroup read-only mount, instead of both running in privileged mode and having /proc mount.
-But the format is different, and how the format translates to filesystem seems to change over time.
-Example:
-- spec format: `kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice:cri-containerd:34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
-- format 1: `/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc.scope`
-- format 2: `/kubepods/burstable/podf6a32139-8482-42e2-9c9b-6269fed32a26/34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
-- format 3: `/system.slice/containerd.service/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+Alternative (and more robust) way is to use data from `/proc` but it requires container to run in privileged mode.
+Here is an example of deployment that uses `/proc`: [daemonset-proc-metrics.yaml](./deployment/daemonset-proc-metrics.yaml)
 
 # Cgroup burst support in linux kernel
 
@@ -210,7 +199,7 @@ CGO_ENABLED=0 go build .
 # build image for deployment
 docker build .
 
-image_name=k8s-cgroup-burst-controller:v0.1.46
+image_name=k8s-cgroup-burst-controller:v0.2.11
 
 docker_username=
 docker build --push . -t docker.io/$docker_username/$image_name

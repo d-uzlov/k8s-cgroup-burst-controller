@@ -135,7 +135,7 @@ func main() {
 	containerMetricsHandler := promhttp.HandlerFor(containerRegistry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 	})
-	if appConfig.EnableCgroupMetrics {
+	if appConfig.CgroupPathAlgorithm != appconfig.CgroupFromNone {
 		logger.Info("adding cgroup gathering before /container_metrics endpoint")
 		containerMetricsHandler = appmetrics.NewInterceptHandler(ctx, containerMetricsHandler, containerMetrics.RunUpdates, appConfig.CgroupUpdateDelay, appConfig.CgroupMetricsTimeout)
 	}

@@ -17,7 +17,7 @@ spec:
         app: cgroup-burst
         cgroup.meoe.io/burst: enable
       annotations:
-        cgroup.meoe.io/burst: cgroup-burst=10m
+        cgroup.meoe.io/burst: cgroup-burst=50m
     spec:
       serviceAccountName: cgroup-burst-controller
       tolerations:
@@ -27,7 +27,7 @@ spec:
         cgroup.meoe.io/node: enable
       containers:
       - name: cgroup-burst
-        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.1.46
+        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.2.11
         ports:
         - name: metrics
           containerPort: 2112
@@ -60,8 +60,8 @@ spec:
           value: cgroup.meoe.io/burst
         - name: WATCH_CONTAINER_EVENTS
           value: 'true'
-        - name: ENABLE_CGROUP_METRICS
-          value: 'true'
+        - name: CGROUP_PATH_ALGORITHM
+          value: proc
         - name: PROC_ROOT
           value: /host-proc
         resources:
@@ -85,4 +85,4 @@ spec:
       - name: proc
         hostPath:
           path: /proc
-          type: ""
+          type: Directory

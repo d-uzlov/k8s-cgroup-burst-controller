@@ -11,7 +11,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-func GetCPUMetrics(cgroupFolder string, procRoot string, pid int) (nrBurst, burstSeconds float64, err error) {
+func GetCPUMetrics(cgroupFolder string, procRoot string) (nrBurst, burstSeconds float64, err error) {
 	// we need to parse the file manually because currently
 	// cgroup package from containerd does not support reporting on burst stats
 	stats, err := readKVStatsFile(cgroupFolder + "/cpu.stat")

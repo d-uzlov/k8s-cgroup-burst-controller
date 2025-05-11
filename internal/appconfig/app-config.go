@@ -22,12 +22,19 @@ type AppConfig struct {
 	SkipSameSpec         bool
 	WatchContainerEvents bool
 	MetricsAddress       string
-	EnableCgroupMetrics  bool
 	CgroupRoot           string
 	ProcRoot             string
 	CgroupUpdateDelay    time.Duration
 	CgroupMetricsTimeout time.Duration
+	CgroupPathAlgorithm  string
 }
+
+const (
+	CgroupFromNone    = "none"
+	CgroupFromPid     = "pid"
+	CgroupFromSpec    = "spec"
+	CgroupFromSpecPid = "spec-pid"
+)
 
 func ParseConfig() *AppConfig {
 	result := &AppConfig{}
@@ -45,15 +52,18 @@ func ParseConfig() *AppConfig {
 	flag.StringVar(&logLevel, "log-level", "info", "One of: error, warn, info, debug")
 	flag.BoolVar(&result.SkipSameSpec, "skip-same-spec", true, "Watcher sometimes receives repeated updates on pods. Usually you can skip updating container on these repeated events")
 	flag.BoolVar(&result.WatchContainerEvents, "watch-container-events", true, "Watch events from container runtime, in case container spec changed without changes in pod")
-	flag.StringVar(&result.MetricsAddress, "own-metrics-address", ":2112", "Address to listen on for app metrics")
-	flag.BoolVar(&result.EnableCgroupMetrics, "enable-cgroup-metrics", false,
-		"Gather cgroup metrics for affected container from filesystem. "+
-			"Requires that /proc is mounted from host filesystem. Specify path via -proc-root. Alternatively, set hostPID=true. "+
-			"Requires container.securityContext.privileged=true. WIthout privileged mode container is running in its own cgroup namespace and can't find cgroup path of other processes")
-	flag.StringVar(&result.CgroupRoot, "cgroup-root", "/sys/fs/cgroup", "Path to the root of the cgroup mount. Usually don't need to be changed")
-	flag.StringVar(&result.ProcRoot, "proc-root", "/proc", "Path to the root of the /proc mount. When running in a container this should point to /proc mounted from host")
+	flag.StringVar(&result.MetricsAddress, "metrics-address", ":2112", "Address to listen on for metrics")
+	flag.StringVar(&result.CgroupRoot, "cgroup-root", "/sys/fs/cgroup", "Path to the root of the cgroup mount with host data")
+	flag.StringVar(&result.ProcRoot, "proc-root", "/proc", "Path to the root of the /proc mount with host data")
 	flag.DurationVar(&result.CgroupUpdateDelay, "cgroup-update-delay", time.Second*10, "Cgroup metrics can be outdated, this parameter limits time between gathering cgroup metrics")
 	flag.DurationVar(&result.CgroupMetricsTimeout, "cgroup-metrics-timeout", time.Second, "Timeout for updating cgroup metrics")
+	flag.StringVar(&result.CgroupPathAlgorithm, "cgroup-path-algorithm", "none",
+		`One of: none, pid, spec, spec-pid.
+When 'none' is used containers metrics are generated only for spec values, runtime info is missing. Otherwise, you need to configure access to cgroup data.
+pid: cgroup path is read from procfs. You need to have access to original unaltered procfs. This usually requires you to use privileged container.
+spec: try to decode cgroup path from container spec. Relation between spec and real path is not stable, so it may break with updates.
+spec-pid: use spec, fallback to pid when spec failed. Requires prerequisites from both types.`,
+	)
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
@@ -84,6 +94,15 @@ func ParseConfig() *AppConfig {
 
 	if !result.SkipSameSpec && result.WatchContainerEvents {
 		panic("watch-container-events=true requires skip-same-spec=true")
+	}
+
+	switch result.CgroupPathAlgorithm {
+	case CgroupFromNone:
+	case CgroupFromPid:
+	case CgroupFromSpec:
+	case CgroupFromSpecPid:
+	default:
+		panic("invalid cgroup-path-algorithm: " + result.CgroupPathAlgorithm)
 	}
 
 	return result

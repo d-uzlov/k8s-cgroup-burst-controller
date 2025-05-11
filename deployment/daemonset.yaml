@@ -17,7 +17,7 @@ spec:
         app: cgroup-burst
         cgroup.meoe.io/burst: enable
       annotations:
-        cgroup.meoe.io/burst: cgroup-burst=10m
+        cgroup.meoe.io/burst: cgroup-burst=50m
     spec:
       serviceAccountName: cgroup-burst-controller
       tolerations:
@@ -27,12 +27,12 @@ spec:
         cgroup.meoe.io/node: enable
       containers:
       - name: cgroup-burst
-        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.1.46
-        securityContext:
-          readOnlyRootFilesystem: true
+        image: ghcr.io/d-uzlov/k8s-cgroup-burst-controller:v0.2.11
         ports:
         - name: metrics
           containerPort: 2112
+        securityContext:
+          readOnlyRootFilesystem: true
         env:
         - name: LOG_LEVEL
           value: debug
@@ -59,6 +59,10 @@ spec:
           value: cgroup.meoe.io/burst
         - name: WATCH_CONTAINER_EVENTS
           value: 'true'
+        - name: CGROUP_PATH_ALGORITHM
+          value: spec
+        - name: CGROUP_ROOT
+          value: /host-cgroup
         resources:
           requests:
             cpu: 1m
@@ -69,8 +73,15 @@ spec:
         volumeMounts:
         - mountPath: /run/containerd/containerd.sock
           name: containerd-socket
+        - mountPath: /host-cgroup
+          name: cgroup
+          readOnly: true
       volumes:
       - name: containerd-socket
         hostPath:
           path: /run/containerd/containerd.sock
           type: Socket
+      - name: cgroup
+        hostPath:
+          path: /sys/fs/cgroup
+          type: Directory

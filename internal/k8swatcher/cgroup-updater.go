@@ -40,6 +40,7 @@ type CgroupUpdater struct {
 	containerToPod      map[string]*corev1.Pod
 	ownMetrics          *appmetrics.OwnMetrics
 	containerMetrics    *appmetrics.ContainerMetrics
+	cgroupPathAlgorithm string
 }
 
 func setupEventRecorder(_ context.Context, clientset *kubernetes.Clientset, hostname string) record.EventRecorder {
@@ -65,6 +66,7 @@ func CreateCgroupUpdater(ctx context.Context, clientset *kubernetes.Clientset, a
 		containerToPod:      map[string]*corev1.Pod{},
 		ownMetrics:          ownMetrics,
 		containerMetrics:    containerMetrics,
+		cgroupPathAlgorithm: appConfig.CgroupPathAlgorithm,
 	}, nil
 }
 
@@ -125,6 +127,9 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 		case podEvent, ok := <-watcher.ResultChan():
 			if !ok {
 				watcher.Stop()
+				if ctx.Err() != nil {
+					return nil
+				}
 				watcher, err = cu.createWatcher(ctx)
 				if err != nil {
 					return err
@@ -358,26 +363,28 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 	cu.containerToPod[id] = pod
 	cu.ownMetrics.ContainerIdCacheSize.Set(float64(len(cu.containerToPod)))
 
-	gatherMetrics, err := cu.ContainerdHelper.GetCgroupBurstReader(ctx, id)
-	if err != nil {
-		logger.Error("could not create cgroup reader")
-		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
-			Operation: appmetrics.CacheRemove,
-			Id:        id,
+	if cu.cgroupPathAlgorithm != appconfig.CgroupFromNone {
+		gatherMetrics, err := cu.ContainerdHelper.GetCgroupBurstReader(ctx, id, cu.cgroupPathAlgorithm)
+		if err != nil {
+			logger.Error("could not create cgroup reader", "error", err.Error())
+			cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+				Operation: appmetrics.CacheRemove,
+				Id:        id,
+			}
+			return
 		}
-		return
-	}
-	cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
-		Operation: appmetrics.CacheAdd,
-		Id:        id,
-		Labels:    prometheus.Labels{
-			"node":      cu.appConfig.NodeName,
-			"namespace": pod.Namespace,
-			"pod":       pod.Name,
-			"container": containerStatus.Name,
-			"name":      id,
-		},
-		Update:    gatherMetrics,
+		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+			Operation: appmetrics.CacheAdd,
+			Id:        id,
+			Labels:    prometheus.Labels{
+				"node":      cu.appConfig.NodeName,
+				"namespace": pod.Namespace,
+				"pod":       pod.Name,
+				"container": containerStatus.Name,
+				"name":      id,
+			},
+			Update:    gatherMetrics,
+		}
 	}
 	return
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"k8s.io/utils/ptr"
+	"meoe.io/cgroup-burst/internal/appconfig"
 	"meoe.io/cgroup-burst/internal/appmetrics"
 
 	"github.com/containerd/cgroups"
@@ -190,8 +191,76 @@ func (h *ContainerdHelper) UpdateContainerByName(ctx context.Context, podName st
 	return nil
 }
 
-func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) (appmetrics.CgroupUpdaterFunction, error) {
+func (h *ContainerdHelper) getCgroupFolderFromSpec(ctx context.Context, task containerd.Task) ([]string, error) {
+	spec, err := task.Spec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	slogctx.FromCtx(ctx).Debug("creating cgroup path from spec", "spec-cgroup-path", spec.Linux.CgroupsPath)
+
+	// - spec format: `kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice:cri-containerd:34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+	// - format 1: `/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc.scope`
+	// - format 2: `/kubepods/burstable/podf6a32139-8482-42e2-9c9b-6269fed32a26/34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+	// - format 3: `/system.slice/containerd.service/kubepods-burstable-podf6a32139_8482_42e2_9c9b_6269fed32a26.slice/cri-containerd-34c846d151d9e5faab4d5773c0c560abb318178b14defa5af5a5d0254cffacfc`
+
+	result := []string{}
+	colonComponents := strings.Split(spec.Linux.CgroupsPath, ":")
+	if len(colonComponents) != 3 {
+		return nil, fmt.Errorf("expected two ':' values in string")
+	}
+	dashComponents := strings.Split(colonComponents[0], "-")
+	option1 := ""
+	for i := range dashComponents {
+		currentComponent := dashComponents[0]
+		for j := 1; j <= i; j++ {
+			currentComponent += "-" + strings.TrimSuffix(dashComponents[j], ".slice")
+		}
+		option1 += "/" + currentComponent + ".slice"
+	}
+	option1 += "/" + colonComponents[1] + "-" + colonComponents[2] + ".scope"
+	result = append(result, option1)
+
+	option2 := ""
+	for _, v := range dashComponents {
+		v = strings.ReplaceAll(v, "_", "-")
+		v = strings.TrimSuffix(v, ".slice")
+		option2 += "/" + v
+	}
+	option2 += "/" + colonComponents[2]
+	result = append(result, option2)
+
+	option3 := "/system.slice/containerd.service/" + colonComponents[0] + "/" + colonComponents[1] + "-" + colonComponents[2]
+	result = append(result, option3)
+
+	return result, nil
+}
+
+func (h *ContainerdHelper) getCgroupFolderFromPid(task containerd.Task) ([]string, error) {
+	pid := int(task.Pid())
+
+	pidCgroupFile := fmt.Sprintf("%v/%v/cgroup", h.procRoot, pid)
+	cgroupBytes, err := os.ReadFile(pidCgroupFile)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read %v", pidCgroupFile)
+	}
+	text := string(cgroupBytes)
+	parts := strings.SplitN(text, ":", 3)
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	}
+	if parts[0] != "0" || parts[1] != "" {
+		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	}
+	path := strings.TrimSuffix(parts[2], "\n")
+	return []string{path}, nil
+}
+
+func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string, cgroupPathAlgorithm string) (appmetrics.CgroupUpdaterFunction, error) {
+	logger := slogctx.FromCtx(ctx)
+
 	if mode := cgroups.Mode(); mode != cgroups.Unified {
+		// only cgroup v2 is supported
 		return nil, fmt.Errorf("unknown cgroup mode: %v", mode)
 	}
 
@@ -203,26 +272,55 @@ func (h *ContainerdHelper) GetCgroupBurstReader(ctx context.Context, id string) 
 	if err != nil {
 		return nil, err
 	}
-	pid := int(task.Pid())
 
-	slogctx.FromCtx(ctx).Debug("creating cgroup reader", "container-id", id, "pid", pid)
+	var cgroupFolderList []string
+	switch cgroupPathAlgorithm {
+	case appconfig.CgroupFromPid:
+		cgroupFolderList, err = h.getCgroupFolderFromPid(task)
+		if err != nil {
+			return nil, err
+		}
+	case appconfig.CgroupFromSpec, appconfig.CgroupFromSpecPid:
+		cgroupFolderList, err = h.getCgroupFolderFromSpec(ctx, task)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	cgroupBytes, err := os.ReadFile(fmt.Sprintf("%v/%v/cgroup", h.procRoot, pid))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to get cgroup path")
+	cgroupFolder := ""
+	for _, v := range cgroupFolderList {
+		folder := h.cgroupRoot + v
+		logger.Debug("checking cgroup folder", "folder", folder)
+		if _, err := os.Stat(folder); os.IsNotExist(err) {
+			continue
+		}
+		cgroupFolder = folder
+		break
 	}
-	text := string(cgroupBytes)
-	parts := strings.SplitN(text, ":", 3)
-	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	if cgroupFolder == "" {
+		if cgroupPathAlgorithm == appconfig.CgroupFromSpecPid {
+			cgroupFolderList, err = h.getCgroupFolderFromPid(task)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, v := range cgroupFolderList {
+			folder := h.cgroupRoot + v
+			if _, err := os.Stat(folder); os.IsNotExist(err) {
+				continue
+			}
+			cgroupFolder = folder
+			break
+		}
 	}
-	if parts[0] != "0" || parts[1] != "" {
-		return nil, fmt.Errorf("invalid cgroup entry: %q", text)
+	if cgroupFolder == "" {
+		return nil, fmt.Errorf("cgroup folder is not found")
 	}
-	path := strings.TrimSuffix(parts[2], "\n")
+
+	logger.Debug("creating cgroup reader", "cgroup-folder", cgroupFolder)
 
 	result := func() (nrBurst float64, burstSeconds float64, err error) {
-		return GetCPUMetrics(h.cgroupRoot+path, h.procRoot, pid)
+		return GetCPUMetrics(cgroupFolder, h.procRoot)
 	}
 	return result, nil
 }
