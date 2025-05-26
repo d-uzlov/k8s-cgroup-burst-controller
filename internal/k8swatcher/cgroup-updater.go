@@ -74,14 +74,22 @@ func (cu *CgroupUpdater) Close() {
 	cu.ContainerdHelper.Close()
 }
 
-func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Interface, err error) {
+func (cu *CgroupUpdater) createWatcher(ctx context.Context, fromStart bool) (watcher watch.Interface, err error) {
 	logger := slogctx.FromCtx(ctx)
 
 	cu.ownMetrics.K8sWatchStreamsTotal.Inc()
 	sendInitialEvents := false
-	if cu.lastResourceVersion == "0" {
+
+	if fromStart {
+		cu.lastResourceVersion = "0"
+		// purge all caches to avoid missing Delete updates
+		cu.containerToPod = map[string]*corev1.Pod{}
+		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
+			Operation: appmetrics.CachePurge,
+		}
 		sendInitialEvents = true
 	}
+
 	logger.Info("starting new watch", "from-version", cu.lastResourceVersion)
 	watcher, err = cu.clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{
 		Watch:                true,
@@ -96,29 +104,33 @@ func (cu *CgroupUpdater) createWatcher(ctx context.Context) (watcher watch.Inter
 	if err == nil {
 		return
 	}
+	if fromStart {
+		// prevent possible infinite loop
+		return
+	}
 	if apierrors.IsGone(err) || apierrors.IsResourceExpired(err) {
-		if cu.lastResourceVersion == "0" {
-			// prevent infinite loop
-			return
-		}
-		// lastResourceVersion has expired
-		cu.lastResourceVersion = "0"
-		// purge all caches to avoid missing updates
-		cu.containerToPod = map[string]*corev1.Pod{}
-		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
-			Operation: appmetrics.CachePurge,
-		}
-		return cu.createWatcher(ctx)
+		return cu.createWatcher(ctx, true)
 	}
 	return
 }
 
 func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan string) error {
-	watcher, err := cu.createWatcher(ctx)
+	watcher, err := cu.createWatcher(ctx, true)
 	if err != nil {
 		return err
 	}
 	defer watcher.Stop()
+	restartWatcher := func(fromStart bool) error {
+		watcher.Stop()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		watcher, err = cu.createWatcher(ctx, fromStart)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
 
 	for {
 		select {
@@ -126,13 +138,26 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			return nil
 		case podEvent, ok := <-watcher.ResultChan():
 			if !ok {
-				watcher.Stop()
-				if ctx.Err() != nil {
-					return nil
-				}
-				watcher, err = cu.createWatcher(ctx)
+				err := restartWatcher(false)
 				if err != nil {
 					return err
+				}
+				break
+			}
+			if podEvent.Type == watch.Error {
+				cu.ownMetrics.K8sWatchErrorsTotal.Inc()
+				status, ok := podEvent.Object.(*metav1.Status)
+				if !ok {
+					return fmt.Errorf("watch: could not cast error event to metav1.Status: type %T", podEvent.Object)
+				}
+				switch status.Reason {
+				case metav1.StatusReasonTimeout, metav1.StatusReasonExpired, metav1.StatusReasonGone:
+					err := restartWatcher(true)
+					if err != nil {
+						return err
+					}
+				default:
+					return fmt.Errorf("unexpected error event status: %v", status.Reason)
 				}
 				break
 			}
@@ -144,34 +169,42 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			if !ok {
 				return fmt.Errorf("containerd updates channel is closed")
 			}
-			pod, ok := cu.containerToPod[id]
-			if !ok {
-				break
-			}
-
-			callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
-
-			// the program could receive events of its own updates
-			// this is fine, because on the second iteration
-			// the program will see that there are no changes in burst spec and skip the update
-
-			// we call the full updatePod method because in case we need to emit events, we need full pod context
-			changed, err := cu.UpdatePod(callCtx, pod)
-			if err != nil {
-				cu.ownMetrics.PodUpdatesContainerdFailTotal.Inc()
-				break
-			}
-			if changed {
-				cu.ownMetrics.PodUpdatesContainerdSuccessTotal.Inc()
-			} else {
-				cu.ownMetrics.PodUpdatesContainerdSkipTotal.Inc()
-			}
+			cu.handleContainerUpdateEvent(ctx, id)
 		}
 	}
 }
 
-func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) error {
+func (cu *CgroupUpdater) handleContainerUpdateEvent(ctx context.Context, id string) {
 	logger := slogctx.FromCtx(ctx)
+
+	pod, ok := cu.containerToPod[id]
+	if !ok {
+		logger.Warn("received container update notification for unknown container", "container-id", id)
+		return
+	}
+
+	callCtx := slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace, "update-type", "restore on containerd event")
+	logger = slogctx.FromCtx(ctx)
+
+	// the program could receive events of its own updates
+	// this is fine, because on the second iteration
+	// the program will see that there are no changes in burst spec and skip the update
+
+	// we call the full updatePod method because in case we need to emit events, we need full pod context
+	changed, err := cu.UpdatePod(callCtx, pod)
+	if err != nil {
+		logger.Error("could not update pod", "error", err.Error())
+		cu.ownMetrics.PodUpdatesContainerdFailTotal.Inc()
+		return
+	}
+	if changed {
+		cu.ownMetrics.PodUpdatesContainerdSuccessTotal.Inc()
+	} else {
+		cu.ownMetrics.PodUpdatesContainerdSkipTotal.Inc()
+	}
+}
+
+func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) error {
 	switch event.Type {
 	case watch.Bookmark:
 		pod, ok := event.Object.(*corev1.Pod)
@@ -195,17 +228,7 @@ func (cu *CgroupUpdater) handlePodEvent(ctx context.Context, event watch.Event) 
 		cu.ownMetrics.K8sWatchDeletesTotal.Inc()
 		cu.handlePodDelete(ctx, pod)
 	case watch.Error:
-		status, ok := event.Object.(*metav1.Status)
-		if !ok {
-			return fmt.Errorf("unexpected error type %T", event.Object)
-		}
-		if status.Reason == metav1.StatusReasonTimeout {
-			logger.Debug("watch timeout")
-		} else {
-			cu.ownMetrics.K8sWatchErrorsTotal.Inc()
-			logger.Error("received error status", "value", status)
-		}
-		return nil
+		return fmt.Errorf("unexpected watch event type: error")
 	default:
 		return fmt.Errorf("unknown event type: %s", event.Type)
 	}
@@ -216,7 +239,7 @@ func (cu *CgroupUpdater) handlePodUpdate(ctx context.Context, pod *corev1.Pod) {
 	ctx = slogctx.With(ctx, "pod", pod.Name, "namespace", pod.Namespace)
 	changed, err := cu.UpdatePod(ctx, pod)
 	if err != nil {
-		slogctx.FromCtx(ctx).Error(err.Error())
+		slogctx.FromCtx(ctx).Error("could not update pod", "error", err.Error())
 		cu.er.Event(pod, corev1.EventTypeWarning, eventPodError, err.Error())
 		cu.ownMetrics.PodUpdatesK8sFailTotal.Inc()
 		// error here is not propagated intentionally
@@ -376,14 +399,14 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 		cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
 			Operation: appmetrics.CacheAdd,
 			Id:        id,
-			Labels:    prometheus.Labels{
+			Labels: prometheus.Labels{
 				"node":      cu.appConfig.NodeName,
 				"namespace": pod.Namespace,
 				"pod":       pod.Name,
 				"container": containerStatus.Name,
 				"name":      id,
 			},
-			Update:    gatherMetrics,
+			Update: gatherMetrics,
 		}
 	}
 	return
