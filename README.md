@@ -142,14 +142,16 @@ App provides several types of metrics:
 - Own metrics. Prefixed with `cgroup_burst_`. Served on `/metrics`
 - Pod spec metrics. Tries to mimic kube-state-metrics. Served on `/container_metrics`
 - - `kube_pod_container_cgroup_burst`
-- Cgroup statistics. Tries to mimic cAdvisor metrics. Served on `/container_metrics`
+- Container cgroup statistics. Tries to mimic cAdvisor metrics. Served on `/container_metrics`
 - - `container_cpu_cgroup_burst_periods_total`
 - - `container_cpu_cgroup_burst_seconds_total`
 - Standard Golang metrics. Served on `/default_metrics`
 
-Cgroup statistics require access to host cgroup info, and work only with cgroup v2.
+Check out example configuration for prometheus-operator resources: [metrics.yaml](./deployment/metrics.yaml)
+
+Container cgroup statistics require access to host cgroup info, and work only with cgroup v2.
 Safer way to find it is to decode cgroup info from container spec. Example deployment is configured to use this method.
-However, the format seems to be unstable, so it can theoretically break with updates.
+However, the format seems to be unstable, so it can theoretically break with updates to runc, containerd, kubelet or some other related software.
 
 Alternative (and more robust) way is to use data from `/proc` but it requires container to run in privileged mode.
 Here is an example of deployment that uses `/proc`: [daemonset-proc-metrics.yaml](./deployment/daemonset-proc-metrics.yaml)
