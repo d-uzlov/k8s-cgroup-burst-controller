@@ -34,7 +34,9 @@ dch -v 6.12.22-burstunlock0-0~bpo12+1
 dch --release --distribution cgroup-burst-unlock
 
 export MAKEFLAGS=-j$(nproc)
-export DEB_BUILD_PROFILES='nodoc pkg.linux.nokerneldbg pkg.linux.nokerneldbginfo'
+# debug info is required for some stuff to work, for example BPF CO-RE, even without installing debug packages
+# export DEB_BUILD_PROFILES='nodoc pkg.linux.nokerneldbg pkg.linux.nokerneldbginfo'
+export DEB_BUILD_PROFILES='nodoc'
 
 debian/rules debian/control
 
@@ -51,16 +53,27 @@ dpkg-buildpackage --build=any,all --no-pre-clean --no-sign
 # make -f debian/rules.gen binary-arch_amd64_none_amd64
 # make -f debian/rules.real binary_headers-common
 
+# after build create archive with packages
+cd ..
+
 sudo apt install zip
 
-zip 6.12.22-burstunlock0.zip \
-  linux-headers-6.12.22-burstunlock0+bpo-amd64_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
-  linux-image-6.12.22-burstunlock0+bpo-amd64-unsigned_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
-  linux-headers-6.12.22-burstunlock0+bpo-common_6.12.22-burstunlock0-0~bpo12+1_all.deb \
-  linux-kbuild-6.12.22-burstunlock0+bpo_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+zip -0 6.12.22-burstunlock0.zip \
+  bpftool_7.5.0+6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
   linux-config-6.12_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-headers-6.12.22-burstunlock0+bpo-amd64_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-headers-6.12.22-burstunlock0+bpo-common_6.12.22-burstunlock0-0~bpo12+1_all.deb \
+  linux-image-6.12.22-burstunlock0+bpo-amd64-unsigned_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-kbuild-6.12.22-burstunlock0+bpo_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
   linux-libc-dev_6.12.22-burstunlock0-0~bpo12+1_all.deb \
   linux-source-6.12_6.12.22-burstunlock0-0~bpo12+1_all.deb
+
+zip -0 6.12.22-burstunlock0-debug.zip \
+  linux-bpf-dev_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-image-6.12.22-burstunlock0+bpo-amd64-dbg_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-kbuild-6.12.22-burstunlock0+bpo-dbgsym_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-perf_6.12.22-burstunlock0-0~bpo12+1_amd64.deb \
+  linux-perf-dbgsym_6.12.22-burstunlock0-0~bpo12+1_amd64.deb
 
 remote=build-kernel-debian.guest.lan
 rm ./env/*.zip

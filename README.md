@@ -225,16 +225,33 @@ sudo dpkg --list | grep 6.12.22-burstunlock
 
 mkdir linux-6.12.22-burstunlock0
 cd linux-6.12.22-burstunlock0
+
 wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-debian-6.12/6.12.22-burstunlock0.zip
-unzip 6.12.22-burstunlock0.zip
+mkdir no-debug
+unzip -d no-debug 6.12.22-burstunlock0.zip
 
 sudo apt install -y libdw1 pahole gcc-12 binutils
 
-sudo dpkg -i *-burstunlock0-*.deb
+sudo dpkg -i ./no-debug/*.deb
 
-rm 6.12.22-burstunlock0.zip
+# optionally also install debug packages
+wget https://github.com/d-uzlov/k8s-cgroup-burst-controller/releases/download/kernel-debian-6.12/6.12.22-burstunlock0-debug.zip
+mkdir debug
+unzip -d debug 6.12.22-burstunlock0-debug.zip
 
-# if you want to remove this kernel
+sudo apt install -y libbabeltrace1 libdebuginfod1 libopencsd1 libtraceevent1 libunwind8 libpython3.11
+
+sudo dpkg -i ./debug/*.deb
+
+# list installed packages
+sudo dpkg --list | grep 6.12.22-burstunlock0
+
+```
+
+If you want to remove this kernel:
+
+```bash
+
 sudo dpkg --list | grep 6.12.22-burstunlock0 | awk '{ print $2 }' | xargs sudo dpkg -P
 
 ```
