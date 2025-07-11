@@ -29,10 +29,10 @@ type OwnMetrics struct {
 	PodUpdatesK8sFailTotal           prometheus.Counter
 	PodUpdatesK8sSkipTotal           prometheus.Counter
 	PodUpdatesContainerdSuccessTotal prometheus.Counter
-	PodUpdatesContainerdFailTotal prometheus.Counter
-	PodUpdatesContainerdSkipTotal prometheus.Counter
-	PodUnusedAnnotationsTotal     prometheus.Counter
-	PodMissingAnnotationsTotal    prometheus.Counter
+	PodUpdatesContainerdFailTotal    prometheus.Counter
+	PodUpdatesContainerdSkipTotal    prometheus.Counter
+	PodUnusedAnnotations             *prometheus.GaugeVec
+	PodMissingAnnotationsTotal       *prometheus.GaugeVec
 
 	// container metrics
 	ContainerUpdateAttemptsSkipTotal    prometheus.Counter
@@ -155,18 +155,18 @@ func NewOwnMetrics(registry *prometheus.Registry) *OwnMetrics {
 				"from": "containerd",
 			},
 		}),
-		PodUnusedAnnotationsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+		PodUnusedAnnotations: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: prometheusNamespace,
 			Subsystem: "pod",
-			Name:      "annotations_unused_total",
-			Help:      "Amount of annotations that specify containers that don't exist in the pod",
-		}),
-		PodMissingAnnotationsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name:      "unused_annotation",
+			Help:      "Const metric that exists only for pods that specify annotations for containers that don't exist",
+		}, []string{"node", "namespace", "pod", "remaining_containers"}),
+		PodMissingAnnotationsTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: prometheusNamespace,
 			Subsystem: "pod",
-			Name:      "annotations_missing_total",
+			Name:      "missing_annotation",
 			Help:      "Amount of pods that match label but do not have an annotation",
-		}),
+		}, []string{"node", "namespace", "pod"}),
 		// container metrics
 		ContainerUpdateAttemptsSkipTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: prometheusNamespace,
@@ -217,7 +217,7 @@ func NewOwnMetrics(registry *prometheus.Registry) *OwnMetrics {
 	registry.MustRegister(result.PodUpdatesContainerdSuccessTotal)
 	registry.MustRegister(result.PodUpdatesContainerdFailTotal)
 	registry.MustRegister(result.PodUpdatesContainerdSkipTotal)
-	registry.MustRegister(result.PodUnusedAnnotationsTotal)
+	registry.MustRegister(result.PodUnusedAnnotations)
 	registry.MustRegister(result.PodMissingAnnotationsTotal)
 
 	// container metrics

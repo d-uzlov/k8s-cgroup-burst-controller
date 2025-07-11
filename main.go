@@ -136,7 +136,7 @@ func main() {
 		ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 	})
 	if appConfig.CgroupPathAlgorithm != appconfig.CgroupFromNone {
-		logger.Info("adding cgroup gathering before /container_metrics endpoint")
+		logger.Info("enabling cgroup stats gathering")
 		containerMetricsHandler = appmetrics.NewInterceptHandler(ctx, containerMetricsHandler, containerMetrics.RunUpdates, appConfig.CgroupUpdateDelay, appConfig.CgroupMetricsTimeout)
 	}
 	appmetrics.SetupMetricListener(ctx, appConfig.MetricsAddress, ownMetricsHandler, containerMetricsHandler, logHandler)

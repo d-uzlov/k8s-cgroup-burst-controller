@@ -115,6 +115,8 @@ func (cu *CgroupUpdater) createWatcher(ctx context.Context, fromStart bool) (wat
 }
 
 func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan string) error {
+	logger := slogctx.FromCtx(ctx)
+
 	watcher, err := cu.createWatcher(ctx, true)
 	if err != nil {
 		return err
@@ -144,6 +146,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 				}
 				break
 			}
+			logger.Debug("got pod event", "type", podEvent.Type, "value", podEvent)
 			if podEvent.Type == watch.Error {
 				cu.ownMetrics.K8sWatchErrorsTotal.Inc()
 				status, ok := podEvent.Object.(*metav1.Status)
@@ -262,10 +265,16 @@ func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 			logger.Error("can't parse container ID on pod deletion", "value", containerStatus.ContainerID)
 			continue
 		}
-		cu.deleteFromCache(id)
+		cu.deleteContainerFromCache(id)
 	}
+	cu.ownMetrics.PodUnusedAnnotations.DeletePartialMatch(prometheus.Labels{
+		"node": cu.appConfig.NodeName,
+		"namespace": pod.Namespace,
+		"pod": pod.Name,
+	})
+	cu.ownMetrics.PodMissingAnnotationsTotal.DeleteLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
 }
-func (cu *CgroupUpdater) deleteFromCache(id string) {
+func (cu *CgroupUpdater) deleteContainerFromCache(id string) {
 	cu.containerMetrics.GetRequestChan() <- appmetrics.MetricOperation{
 		Operation: appmetrics.CacheRemove,
 		Id:        id,
@@ -300,12 +309,22 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 	logger := slogctx.FromCtx(ctx)
 	pa := pod.Annotations
 	if pa == nil {
-		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
+		metric, err := cu.ownMetrics.PodMissingAnnotationsTotal.GetMetricWithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
+		if err != nil {
+			logger.Error("could not get PodMissingAnnotationsTotal metric", "error", err.Error())
+		} else {
+			metric.Set(1)
+		}
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfigRaw, ok := pa[cu.appConfig.BurstAnnotation]
 	if !ok {
-		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
+		metric, err := cu.ownMetrics.PodMissingAnnotationsTotal.GetMetricWithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
+		if err != nil {
+			logger.Error("could not get PodMissingAnnotationsTotal metric", "error", err.Error())
+		} else {
+			metric.Set(1)
+		}
 		return false, fmt.Errorf("burst config is missing from annotations")
 	}
 	burstConfig, err := parseMultiConfig(burstConfigRaw)
@@ -313,18 +332,43 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 		return false, errors.Wrapf(err, "could not parse burst annotation")
 	}
 	if len(burstConfig) == 0 {
-		cu.ownMetrics.PodMissingAnnotationsTotal.Inc()
+		metric, err := cu.ownMetrics.PodMissingAnnotationsTotal.GetMetricWithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
+		if err != nil {
+			logger.Error("could not get PodMissingAnnotationsTotal metric", "error", err.Error())
+		} else {
+			metric.Set(1)
+		}
 		logger.Warn("burst annotation is empty")
 		return false, nil
 	}
 	logger.Info("found matching pod", "burst-annotation", burstConfig)
+	cu.ownMetrics.PodMissingAnnotationsTotal.DeleteLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		containerChanged := cu.updateContainer(ctx, pod, containerStatus, burstConfig)
 		changed = changed || containerChanged
 	}
+	cu.ownMetrics.PodUnusedAnnotations.DeletePartialMatch(prometheus.Labels{
+		"node": cu.appConfig.NodeName,
+		"namespace": pod.Namespace,
+		"pod": pod.Name,
+	})
 	if len(burstConfig) != 0 {
 		logger.Warn("part of annotation is not used", "remaining", burstConfig)
-		cu.ownMetrics.PodUnusedAnnotationsTotal.Inc()
+		remainingContainers := ""
+		first := true
+		for k := range burstConfig {
+			remainingContainers += k
+			if first {
+				first = false
+				k += ","
+			}
+		}
+		metric, err := cu.ownMetrics.PodUnusedAnnotations.GetMetricWithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, remainingContainers)
+		if err != nil {
+			logger.Error("could not get PodUnusedAnnotations metric", "error", err.Error())
+		} else {
+			metric.Set(1)
+		}
 	}
 
 	return
@@ -379,7 +423,7 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 		cu.ownMetrics.ContainerUpdateAttemptsSkipTotal.Inc()
 	}
 	if burstSeconds == 0 {
-		cu.deleteFromCache(id)
+		cu.deleteContainerFromCache(id)
 		return
 	}
 
