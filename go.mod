@@ -1,8 +1,6 @@
 module meoe.io/cgroup-burst
 
-go 1.24.0
-
-toolchain go1.24.2
+go 1.25.0
 
 require (
 	github.com/containerd/cgroups v1.1.0
