@@ -202,14 +202,14 @@ go get -u k8s.io/kube-openapi@9bd5c66d9911c53f5aedb8595fde9c229ca56703
 go mod tidy
 
 # local testing
-app_version=v0.2.16
+app_version=v0.2.17
 CGO_ENABLED=0 go build -ldflags="-X meoe.io/cgroup-burst/internal/appconfig.externalVersion=$app_version" .
 ./cgroup-burst
 
 # build image for deployment
 docker build .
 
-app_version=v0.2.16
+app_version=v0.2.17
 image_name=k8s-cgroup-burst-controller:$app_version
 
 docker_username=
