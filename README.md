@@ -195,6 +195,12 @@ and there are no ways to bypass this, regardless of any kernel parameters.
 
 ```bash
 
+# update dependencies if required
+go get -u ./...
+# https://github.com/kubernetes/kubernetes/issues/133584
+go get -u k8s.io/kube-openapi@9bd5c66d9911c53f5aedb8595fde9c229ca56703
+go mod tidy
+
 # local testing
 CGO_ENABLED=0 go build .
 ./cgroup-burst
