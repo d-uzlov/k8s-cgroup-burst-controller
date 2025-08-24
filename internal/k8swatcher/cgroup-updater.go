@@ -106,11 +106,13 @@ func (cu *CgroupUpdater) createWatcher(ctx context.Context, fromStart bool) (wat
 	}
 	if fromStart {
 		// prevent possible infinite loop
+		err = errors.Wrap(err, "could not create pod watcher (fromStart=true)")
 		return
 	}
 	if apierrors.IsGone(err) || apierrors.IsResourceExpired(err) {
 		return cu.createWatcher(ctx, true)
 	}
+	err = errors.Wrap(err, "could not create pod watcher (fromStart=false)")
 	return
 }
 
@@ -119,7 +121,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 
 	watcher, err := cu.createWatcher(ctx, true)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "could not create watcher")
 	}
 	defer watcher.Stop()
 	restartWatcher := func(fromStart bool) error {
@@ -129,7 +131,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 		}
 		watcher, err = cu.createWatcher(ctx, fromStart)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "could not create watcher")
 		}
 		return nil
 	}
@@ -140,9 +142,10 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			return nil
 		case podEvent, ok := <-watcher.ResultChan():
 			if !ok {
+				logger.Info("could not read from watch channel")
 				err := restartWatcher(false)
 				if err != nil {
-					return err
+					return errors.Wrap(err, "restartWatcher failed")
 				}
 				break
 			}
@@ -157,7 +160,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 				case metav1.StatusReasonTimeout, metav1.StatusReasonExpired, metav1.StatusReasonGone:
 					err := restartWatcher(true)
 					if err != nil {
-						return err
+						return errors.Wrap(err, "restartWatcher failed")
 					}
 				default:
 					return fmt.Errorf("unexpected error event status: %v", status.Reason)
@@ -166,7 +169,7 @@ func (cu *CgroupUpdater) Watch(ctx context.Context, containerUpdates <-chan stri
 			}
 			err = cu.handlePodEvent(ctx, podEvent)
 			if err != nil {
-				return err
+				return errors.Wrap(err, "handlePodEvent failed")
 			}
 		case id, ok := <-containerUpdates:
 			if !ok {
@@ -268,9 +271,9 @@ func (cu *CgroupUpdater) handlePodDelete(ctx context.Context, pod *corev1.Pod) {
 		cu.deleteContainerFromCache(id)
 	}
 	cu.ownMetrics.PodUnusedAnnotations.DeletePartialMatch(prometheus.Labels{
-		"node": cu.appConfig.NodeName,
+		"node":      cu.appConfig.NodeName,
 		"namespace": pod.Namespace,
-		"pod": pod.Name,
+		"pod":       pod.Name,
 	})
 	cu.ownMetrics.PodMissingAnnotationsTotal.DeleteLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name)
 }
@@ -348,9 +351,9 @@ func (cu *CgroupUpdater) UpdatePod(ctx context.Context, pod *corev1.Pod) (change
 		changed = changed || containerChanged
 	}
 	cu.ownMetrics.PodUnusedAnnotations.DeletePartialMatch(prometheus.Labels{
-		"node": cu.appConfig.NodeName,
+		"node":      cu.appConfig.NodeName,
 		"namespace": pod.Namespace,
-		"pod": pod.Name,
+		"pod":       pod.Name,
 	})
 	if len(burstConfig) != 0 {
 		logger.Warn("part of annotation is not used", "remaining", burstConfig)
@@ -405,7 +408,11 @@ func (cu *CgroupUpdater) updateContainer(ctx context.Context, pod *corev1.Pod, c
 	ctx = slogctx.With(ctx, "container-id", id, "burst-string", burstString)
 	logger = slogctx.FromCtx(ctx)
 
-	cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
+	if burstString != "" {
+		cu.containerMetrics.SpecCgroupBurst.WithLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name).Set(burstSeconds)
+	} else {
+		cu.containerMetrics.SpecCgroupBurst.DeleteLabelValues(cu.appConfig.NodeName, pod.Namespace, pod.Name, containerStatus.Name)
+	}
 
 	changed, err = cu.ContainerdHelper.UpdateContainer(ctx, id, burstSeconds)
 	if err != nil {
