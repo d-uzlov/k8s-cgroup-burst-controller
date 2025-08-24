@@ -3,6 +3,7 @@ package appconfig
 import (
 	"flag"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/kouhin/envflag"
@@ -39,6 +40,9 @@ const (
 func ParseConfig() *AppConfig {
 	result := &AppConfig{}
 
+	var versionFlag bool
+	flag.BoolVar(&versionFlag, "version", false, "Print version info")
+
 	flag.StringVar(&result.NodeName, "node-name", "", "[Required] K8s node name to use as a watch filter")
 	flag.StringVar(&result.PodName, "pod-name", "", "[Required] Name of the pod running the app")
 	flag.StringVar(&result.PodNamespace, "pod-namespace", "", "[Required] Namespace of the pod running the app")
@@ -67,6 +71,15 @@ spec-pid: use spec, fallback to pid when spec failed. Requires prerequisites fro
 
 	if err := envflag.Parse(); err != nil {
 		panic(err)
+	}
+
+	if versionFlag {
+		printVersion()
+		os.Exit(0)
+	}
+
+	if result.Hostname == "" {
+		result.Hostname, _ = os.Hostname()
 	}
 
 	if result.NodeName == "" {
